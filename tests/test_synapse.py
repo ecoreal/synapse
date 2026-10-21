@@ -324,6 +324,77 @@ class TestTargetsOf(unittest.TestCase):
         self.assertTrue(synapse.read_dirty())
 
 
+class TestStatusFreshness(unittest.TestCase):
+    """监控器自己死了, 没人会知道 —— 所以 status 必须回答"上次体检是什么时候"。
+
+    latest.json 只在全量体检时写。若它很久没更新, 说明定时器/任务挂了,
+    这正是"看板全绿但其实早就没在跑"的经典坑。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in ("HOME", "CONFIG", "REPORTS", "ISSUES")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        os.makedirs(synapse.REPORTS, exist_ok=True)
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {
+            "base_url": "https://a.invalid", "api_key": "sk-1",
+            "models": ["m1"], "enabled": True}}})
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def _latest(self, hours_ago, summary=None):
+        import datetime as dt
+        t = dt.datetime.now() - dt.timedelta(hours=hours_ago)
+        synapse.save_json(os.path.join(synapse.REPORTS, "latest.json"), {
+            "time": t.strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": summary or {"total": 3, "ok": 3, "bad": 0, "warn": 0, "dead": 0},
+            "results": [], "partial": False})
+
+    def test_fresh_check_is_reported_without_warning(self):
+        self._latest(0.1)
+        self.assertEqual(self._run("status"), 0)
+        text = self.out.getvalue()
+        self.assertIn("最近一次体检", text)
+        self.assertNotIn("没在跑", text)
+
+    def test_stale_check_warns_the_watcher_died(self):
+        self._latest(10)
+        self.assertEqual(self._run("status"), 0)
+        text = self.out.getvalue()
+        self.assertIn("没在跑", text)
+
+    def test_no_check_yet_is_said_plainly(self):
+        self.assertEqual(self._run("status"), 0)
+        self.assertIn("无记录", self.out.getvalue())
+
+    def test_status_json_carries_last_check(self):
+        self._latest(2)
+        self.assertEqual(self._run("status", "--json"), 0)
+        import json as _j
+        d = _j.loads(self.out.getvalue())
+        self.assertIn("last_check", d)
+        self.assertAlmostEqual(d["last_check"]["age_hours"], 2, delta=0.5)
+        self.assertFalse(d["last_check"]["stale"])
+
+    def test_unparsable_time_does_not_crash(self):
+        synapse.save_json(os.path.join(synapse.REPORTS, "latest.json"),
+                          {"time": "????", "summary": {"total": 1}, "results": []})
+        self.assertEqual(self._run("status"), 0)
+        self.assertIn("最近一次体检", self.out.getvalue())
+
+
 class TestDocsConsistency(unittest.TestCase):
     """文档里的版本号必须和代码一致。
 

@@ -90,6 +90,7 @@ python3 synapse.py check --json | jq '.summary'
 # 全局一览: 目标清单 / 长跑失败统计(.outage.json) / 未解决台账
 python3 synapse.py status
 python3 synapse.py status --json          # 机读版
+python3 synapse.py status --stale-hours 2  # 超过 2h 没全量体检就告警(默认 3)
 
 # 机器可读输出不止 check: 脚本要能问"这站到底怎么了"、"台账里有什么"
 python3 synapse.py diagnose --target hyb --model z-ai/glm-5.3 --json | jq '.conclusions'
@@ -219,7 +220,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 67 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 72 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

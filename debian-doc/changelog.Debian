@@ -1,3 +1,15 @@
+synapse (1.6.0) unstable; urgency=medium
+
+  * status 新增"最近一次全量体检"新鲜度: 显示时间/年龄/上轮统计。
+    reports/latest.json 只由全量体检写入, 它的年龄就是监控器自己的心跳;
+    超过 --stale-hours(默认 3)就告警"定时任务可能没在跑"。
+    否则定时器悄悄挂掉时, 看板会永远显示上一次的全绿 —— 最误导人的状态
+  * status --json 增加 last_check: {time, summary, age_hours, stale}
+  * 新增 --stale-hours 覆盖阈值
+  * 测试 67 -> 72 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 17:05:00 +0800
+
 synapse (1.5.0) unstable; urgency=medium
 
   * 异常分诊: 网络异常(conn_error/timeout)与"我们自己的 bug"(internal_error)分开报。

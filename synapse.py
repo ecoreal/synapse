@@ -27,7 +27,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 
 def _init_home():
@@ -1086,15 +1086,40 @@ def cmd_diagnose(args, ctx):
     return 0
 
 
+def _age_hours(ts, now_dt=None):
+    """把 '2026-10-21 16:00:00' 算成"多少小时前"; 解析不了返回 None(手改坏的文件不该崩)。"""
+    try:
+        t = datetime.datetime.strptime(str(ts), "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return None
+    return ((now_dt or datetime.datetime.now()) - t).total_seconds() / 3600.0
+
+
+def _last_check(stale_hours=3.0):
+    """最近一次**全量**体检的摘要(latest.json 只有全量体检才写)。
+
+    stale=True 意味着数据已经比阈值更旧: 定时器/任务多半挂了。
+    监控工具自己死掉却继续显示"上次全绿", 是最容易让人放心的假象。
+    """
+    d = load_json(os.path.join(REPORTS, "latest.json"), None)
+    if not d:
+        return None
+    age = _age_hours(d.get("time"))
+    return {"time": d.get("time"), "summary": d.get("summary") or {},
+            "age_hours": None if age is None else round(age, 2),
+            "stale": bool(age is not None and age > stale_hours)}
+
+
 def cmd_status(args, ctx):
     """一览全局: 目标清单 / 脏标记 / 长跑失败统计 / 未解决台账。看板式单次输出。"""
     cfg = load_config()
     db = load_issues()
     snap = load_json(os.path.join(HOME, ".outage.json"), {}) or {}
     dirty = read_dirty()
+    last = _last_check(getattr(args, "stale_hours", 3.0))
     if args.as_json:
         ctx.json({"time": now(), "targets": cfg["targets"], "outage": snap,
-                          "dirty": dirty, "issues": db["issues"]})
+                  "dirty": dirty, "issues": db["issues"], "last_check": last})
         return 0
 
     ctx.say(f"\n=== Synapse 状态  {now()} ===")
@@ -1107,6 +1132,20 @@ def cmd_status(args, ctx):
     if dirty:
         ts, what = (dirty.split("\t", 1) + [""])[:2]
         ctx.say(f"\n[!] 脏标记(未复查): {what}  自 {ts}")
+
+    # 监控器自己有没有在跑? latest.json 只在全量体检时写, 它的年龄就是"心跳"
+    if last is None:
+        ctx.say("\n[最近一次体检] 无记录 → 先跑一次全量 check"
+                "(latest.json 只在全量体检时写, 定向抽查不算)")
+    else:
+        st = last["summary"]
+        age = last["age_hours"]
+        human = "时间无法解析" if age is None else f"{age:.1f}h 前"
+        ctx.say(f"\n[最近一次体检] {last['time']}  ({human})   合计 {st.get('total', '?')} 项"
+                f"  异常 {st.get('bad', 0)}  警告 {st.get('warn', 0)}  失败 {st.get('dead', 0)}")
+        if last["stale"]:
+            ctx.say(f"[!] 已经 {age:.1f}h 没有新的全量体检(阈值 {args.stale_hours}h)"
+                    f" → 定时任务可能没在跑, 检查: {CMD} timer status")
 
     ctx.say("\n[长跑失败统计] (.outage.json, 由 check 累计)")
     if not snap:
@@ -1641,8 +1680,10 @@ def main(argv=None, out=None, err=None):
                    help="把最近一次体检摘要回写到 STATIONS.md 日志区")
     p.set_defaults(fn=cmd_sync_stations)
 
-    p = sub.add_parser("status", help="一览: 目标清单 + 台账 + 长跑失败统计")
+    p = sub.add_parser("status", help="一览: 目标清单 + 台账 + 长跑失败统计 + 上次体检新鲜度")
     p.add_argument("--json", dest="as_json", action="store_true")
+    p.add_argument("--stale-hours", type=float, default=3.0,
+                   help="超过这么多小时没有全量体检就告警(默认 3)")
     p.set_defaults(fn=cmd_status)
 
     ctx = Ctx(out, err)
