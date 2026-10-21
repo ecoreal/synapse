@@ -39,7 +39,7 @@ _synapse_completions() {
             opts="on off status log run --interval --now"
             ;;
         doctor)
-            opts="--json --stale-hours"
+            opts="--json --stale-hours --fix --apply"
             ;;
         uptime)
             opts="--days --target --model --by-station --json"

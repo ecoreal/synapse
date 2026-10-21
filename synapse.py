@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.19.0"
+__version__ = "1.20.0"
 
 
 def _init_home():
@@ -963,6 +963,24 @@ _RE_LEAK_SK = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 _RE_LEAK_BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")
 
 
+def _report_leaks(limit=400):
+    """最近一批报告里, 哪些把疑似密钥写进了文件。doctor 与 doctor --fix 共用。"""
+    try:
+        names = sorted(n for n in os.listdir(REPORTS) if n.endswith(".json"))
+    except OSError:
+        return []
+    hits = []
+    for n in names[:limit]:
+        try:
+            with open(os.path.join(REPORTS, n), encoding="utf-8", errors="ignore") as f:
+                txt = f.read()
+        except OSError:
+            continue
+        if _RE_LEAK_SK.search(txt) or _RE_LEAK_BEARER.search(txt):
+            hits.append(n)
+    return hits
+
+
 def _doctor_checks(stale_hours=3.0):
     """Synapse 自检: 每项都是只读本地检查, 不联网。返回 [{level,name,detail,hint}]。"""
     rows = []
@@ -1108,20 +1126,14 @@ def _doctor_checks(stale_hours=3.0):
         add("ok", "状态文件", "可解析")
 
     # 9. 报告内容: 有没有把 key 写进文件里(旧版本没有脱敏, 站方会回显请求头)
-    leaked, loose = [], []
+    leaked = _report_leaks()               # 只看最近一批, doctor 不该扫全盘
+    loose = []
     try:
         names = sorted(n for n in os.listdir(REPORTS) if n.endswith(".json"))
     except OSError:
         names = []
-    for n in names[:400]:                  # 只看最近一批, doctor 不该扫全盘
+    for n in names[:400]:
         p = os.path.join(REPORTS, n)
-        try:
-            with open(p, encoding="utf-8", errors="ignore") as f:
-                txt = f.read()
-        except OSError:
-            continue
-        if (_RE_LEAK_SK.search(txt) or _RE_LEAK_BEARER.search(txt)):
-            leaked.append(n)
         try:
             if os.stat(p).st_mode & 0o077:
                 loose.append(n)
@@ -1154,6 +1166,81 @@ def _doctor_checks(stale_hours=3.0):
     else:
         add("fail", "Python", f"{v.major}.{v.minor}.{v.micro} 太旧", "需要 3.8+")
     return rows
+
+
+def _doctor_actions(limit=600):
+    """doctor 说出来的问题里, 哪些是能安全自动修的 —— 逐条算成"动作"。
+
+    只收确定性的那类(文件权限)。含密钥的报告不自动改内容:
+    悄悄改掉证据比留着更糟, 人得自己看一眼。
+    """
+    actions = []
+    try:
+        names = sorted(os.listdir(REPORTS))
+    except OSError:
+        return actions
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        path = os.path.join(REPORTS, n)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        mode = st.st_mode & 0o777
+        if mode & 0o077:
+            actions.append({"what": "chmod", "path": path,
+                            "from": format(mode, "o"), "to": "600",
+                            "why": "同目录下的 config.json 是 0600, 报告里可能含响应片段"})
+        if len(actions) >= limit:
+            break
+    return actions
+
+
+def cmd_doctor_fix(args, ctx):
+    """把 doctor 的诊断变成动作: 默认只预览, --apply 才改。"""
+    actions = _doctor_actions()
+    chmods = [a for a in actions if a["what"] == "chmod"]
+    applied = getattr(args, "apply", False)
+
+    if ctx.as_json:
+        ctx.json({"time": now(), "applied": applied, "actions": actions,
+                  "count": len(actions)})
+        return 0
+
+    if not actions:
+        ctx.say("[i] 没有可自动修复的问题。")
+        ctx.say(f"    剩下的(定时器/心跳/含密钥的报告)要人看一眼: {CMD} doctor")
+        return 0
+
+    if not applied:
+        ctx.say(f"\n=== 可自动修复({len(actions)} 项)  —— 预览, 什么都没改 ===")
+        for a in actions[:20]:
+            ctx.say(f"  {a['what']} {a['from']} → {a['to']}   {a['path']}")
+        if len(actions) > 20:
+            ctx.say(f"  ... 另有 {len(actions) - 20} 项")
+        ctx.say(f"\n  动手: {CMD} doctor --fix --apply")
+        ctx.say("  或手动: chmod 600 ~/.config/synapse/reports/*.json")
+        return 0
+
+    fixed = 0
+    for a in chmods:
+        try:
+            os.chmod(a["path"], 0o600)
+            fixed += 1
+        except OSError as e:
+            ctx.say(f"[!] 无法修改 {a['path']}: {e}")
+    ctx.say(f"[OK] 已修 {fixed} 项(报告权限 → 0600)")
+
+    # 含密钥的报告: 只报不算, 悄悄改掉证据比留着更糟
+    leaks = [n for n in _report_leaks()]
+    if leaks:
+        ctx.say(f"[!] 另有 {len(leaks)} 份报告含密钥, 未改动 —— "
+                f"它们可能正是证据, 请看过后自己删:")
+        for n in leaks[:5]:
+            ctx.say(f"    {n}")
+    ctx.say(f"    复查: {CMD} doctor")
+    return 0
 
 
 def cmd_doctor(args, ctx):
@@ -2601,9 +2688,13 @@ def build_parser():
 
     p = sub.add_parser("doctor", help="自检: 数据目录/权限/定时器/新鲜度/台账(只读, 不联网)")
     p.add_argument("--json", dest="as_json", action="store_true")
+    p.add_argument("--fix", action="store_true",
+                   help="进入修复模式(默认只预览; 配 --apply 才动手)")
+    p.add_argument("--apply", action="store_true", help="真的执行修复(仅在 --fix 下有效)")
     p.add_argument("--stale-hours", type=float, default=3.0,
                    help="超过这么多小时没有全量体检就算陈旧(默认 3)")
-    p.set_defaults(fn=cmd_doctor)
+    p.set_defaults(fn=lambda a, c: cmd_doctor_fix(a, c) if getattr(a, "fix", False)
+                   else cmd_doctor(a, c))
 
     p = sub.add_parser("status", help="一览: 目标清单 + 台账 + 长跑统计 + 体检新鲜度 + 长期稳定性")
     p.add_argument("--json", dest="as_json", action="store_true")

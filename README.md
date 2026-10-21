@@ -21,6 +21,17 @@ pi 模型中转站的连通性监控 / 诊断 / 配置修复工具。
 > 源码目录里若还有旧数据文件，首次运行会自动复制迁移过去，原文件保留。
 > 装 Debian 包后命令就是 `synapse`（不再需要 `python3 synapse.py`）。
 
+### 诊断完就动手: `synapse doctor --fix`
+
+`doctor` 指出「38 份报告是 0664」之后，别让人自己去 chmod：
+
+```bash
+synapse doctor --fix            # 默认只预览: chmod 664 → 600  ×38
+synapse doctor --fix --apply    # 真改，然后复查
+```
+
+只做确定性的那一类（文件权限）。**含密钥的报告不自动改写**——悄悄改掉证据比留着更糟，只列出来让人看过再删。真数据上跑一次：38 项 → 0 项，`doctor` 从 3 条警告降到 2 条。
+
 ### 第一屏就是结论: `synapse status`
 
 半夜被叫醒时第一个敲的命令，第一屏必须是结论，而不是 9 行静态配置：
@@ -345,7 +356,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 179 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 184 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

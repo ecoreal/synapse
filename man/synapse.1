@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.19.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.20.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -82,6 +82,23 @@ Python 版本。
 internal_error(Synapse 自己的 bug, 不是站的问题)、config_error(配置没写全)。
 \-\-json 时输出 {days, window, reports_used, targets:[...], summary}。
 .TP
+.B doctor
+自检: 数据目录 / 权限 / 默认目标 / 定时器 / 心跳新鲜度 / 台账 / 报告内容。
+只读, 不联网。返回 0 表示没有故障(有警告仍是 0), 1 表示有故障项。
+.PP
+.B doctor \-\-fix
+把诊断变成动作。\fB默认只预览\fR, 加 \fB\-\-apply\fR 才动手:
+.IP \(bu 2
+报告权限放宽到同组可读(\fB0664\fR 等) → \fBchmod 600\fR。
+      config.json 一直是 0600, 报告里却可能含响应片段, 不该有例外
+.IP \(bu 2
+\fB含密钥的报告不自动改写\fR: 悄悄改掉证据比留着更糟, 只列出来让人看过再删
+.IP \(bu 2
+没有可修项时明说"没有可自动修复的问题", 不假装干了活
+.PP
+\fB\-\-json\fR 输出 {applied, actions:[{what,path,from,to,why}], count}
+—— 预览模式下 applied 恒为 false, 可以先看一眼再决定。
+
 .B status
 全局一览。\fB第一屏是结论\fR, 不是配置清单:
 .IP \(bu 2

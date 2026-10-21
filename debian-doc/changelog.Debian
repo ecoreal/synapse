@@ -1,3 +1,16 @@
+synapse (1.20.0) unstable; urgency=medium
+
+  * doctor --fix: 把诊断变成动作(默认预览, --apply 才改)
+    - 报告权限 0664 → 0600, 与 config.json 同等待遇
+    - 含密钥的报告不自动改写: 悄悄改掉证据比留着更糟, 只列出让人决定
+    - 无可修项时明说"没有可自动修复的问题", 不假装干活
+    - --json: {applied, actions, count}, 预览模式 applied 恒 false
+  * 抽出 _report_leaks(): doctor 检查 #9 与 fix 共用, 不两处各写一遍
+  * 真实数据上 38 项 → 0 项
+  * 测试 179 -> 184 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 23:20:00 +0800
+
 synapse (1.19.0) unstable; urgency=medium
 
   * status: 第一屏改成结论(正在失败最久的是谁/默认站判定/该换成谁/敲什么)

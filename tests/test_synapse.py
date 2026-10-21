@@ -1351,6 +1351,92 @@ def _completion_opts_blocks():
             pending = None
     return blocks
 
+class TestDoctorFix(unittest.TestCase):
+    """doctor 会指出"38 份报告是世界可读的", 然后呢? 让用户自己去 chmod?
+
+    诊断不给动作, 等于把最后一步留给半夜被叫醒的人。但自动改文件又不该悄悄做,
+    所以照 fix 的规矩: 默认只预览, --apply 才动手。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k)
+                       for k in ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _leaky_report(self):
+        path = os.path.join(synapse.REPORTS, "check-20260101-000000.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"time": "2026-01-01 00:00:00", "partial": False,
+                       "summary": {}, "results": []}, f)
+        os.chmod(path, 0o664)
+        return path
+
+    def _mode(self, path):
+        return os.stat(path).st_mode & 0o777
+
+    def test_preview_does_not_touch_anything(self):
+        path = self._leaky_report()
+        rc = synapse.main(["doctor", "--fix"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mode(path), 0o664, "预览就改了文件权限")
+        text = self.out.getvalue()
+        self.assertIn("chmod 600", text)
+        self.assertIn("--apply", text)
+
+    def test_apply_makes_reports_private(self):
+        path = self._leaky_report()
+        rc = synapse.main(["doctor", "--fix", "--apply"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mode(path), 0o600)
+        self.assertIn("已修", self.out.getvalue())
+
+    def test_json_previews_the_actions(self):
+        path = self._leaky_report()
+        synapse.main(["doctor", "--fix", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        self.assertFalse(d["applied"])
+        chmods = [a for a in d["actions"] if a["what"] == "chmod"]
+        self.assertEqual(len(chmods), 1)
+        self.assertEqual(chmods[0]["to"], "600")
+        self.assertEqual(chmods[0]["path"], path)
+        self.assertEqual(self._mode(path), 0o664)
+
+    def test_says_so_when_there_is_nothing_to_fix(self):
+        p = os.path.join(synapse.REPORTS, "check-20260101-000000.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"time": "2026-01-01 00:00:00", "partial": False,
+                       "summary": {}, "results": []}, f)
+        os.chmod(p, 0o600)
+        rc = synapse.main(["doctor", "--fix", "--apply"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0)
+        self.assertIn("没有可自动修复", self.out.getvalue())
+
+    def test_leaked_content_is_not_silently_rewritten(self):
+        """含 key 的报告不自动改内容 —— 只报告, 让人决定。悄悄改掉证据更糟。"""
+        path = os.path.join(synapse.REPORTS, "check-20260101-000000.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"time": "2026-01-01 00:00:00", "partial": False, "summary": {},
+                       "results": [{"target": "t", "model": "m", "kind": "ok",
+                                    "snippet": "Bearer sk-abcdefghijklmnop1234"}]}, f)
+        before = open(path, encoding="utf-8").read()
+        synapse.main(["doctor", "--fix", "--apply"], out=self.out, err=self.err)
+        self.assertEqual(open(path, encoding="utf-8").read(), before)
+        self.assertIn("含密钥", self.out.getvalue())
+
 
 class TestDocsConsistency(unittest.TestCase):
     """文档里的版本号必须和代码一致。
