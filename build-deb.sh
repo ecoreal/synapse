@@ -1,6 +1,6 @@
 #!/bin/bash
 # build-deb.sh — 把 Synapse 打成标准 .deb
-#   源件: synapse.py, man/synapse.1, debian-doc/*, packaging-src/*
+#   源件: synapse*.py(主程序+判定层+探测层), man/synapse.1, debian-doc/*, packaging-src/*
 #   生成: packaging/usr/**, dist/*.deb
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -18,8 +18,12 @@ mkdir -p "$U" packaging/DEBIAN
 install -m644 packaging-src/DEBIAN/control packaging/DEBIAN/control
 install -m755 packaging-src/DEBIAN/postinst packaging/DEBIAN/postinst
 
-# 1) 主程序 -> /usr/lib/synapse
-install -Dm644 synapse.py "$U/lib/synapse/synapse.py"
+# 1) 程序 -> /usr/lib/synapse
+#    synapse.py 是入口(CLI/状态/台账), synapse_classify.py 判定层, synapse_probe.py 探测层。
+#    三者平铺在同一目录, 因为运行时靠 sys.path[0](脚本所在目录)互相 import。
+for f in synapse.py synapse_classify.py synapse_probe.py; do
+    install -Dm644 "$f" "$U/lib/synapse/$f"
+done
 
 # 2) 入口壳 -> /usr/bin
 install -Dm755 packaging-src/bin-synapse "$U/bin/synapse" 2>/dev/null || true

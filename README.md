@@ -8,7 +8,9 @@ pi 模型中转站的连通性监控 / 诊断 / 配置修复工具。
 | 文件 | 说明 |
 |---|---|
 | **`STATIONS.md`** | **你维护的中转站清单（URL / key / 模型）——新站就加这里** |
-| `synapse.py` | 主程序，无第三方依赖（纯标准库） |
+| `synapse.py` | 主程序：CLI / 状态 / 台账 / 配置；无第三方依赖（纯标准库） |
+| `synapse_classify.py` | 判定层：把一次响应归类成"这意味着什么"（纯函数，可穷举测试） |
+| `synapse_probe.py` | 探测层：真正发请求的地方（只读，异常要分诊） |
 | `config.json` | 由 `sync-stations` 从 STATIONS.md 生成的目标清单（手改会被覆盖） |
 | `reports/latest.json` | 最近一次 check 的完整结果（每次 check 同时按时间戳落盘） |
 | `.outage.json` | 长跑失败统计（每 `目标\|\|模型` 的 ok/fail/连败轮数），由 `check` 自动累加，`status` 消费 |
@@ -77,6 +79,10 @@ python3 synapse.py status          # 一览: 目标清单 + 长跑失败统计 +
 | 让 pi 看图（read 工具） | `check --vision` | `toolResult` 形态也要 ✅ |
 | 长跑稳定性 | `watch` + `status` | 连败 ≥2 轮就该停用 |
 
+`check` 每轮会自己讲**趋势**：某个 `目标/模型` 连败到第 2 轮时打一行
+`[趋势] ... 连续 2 轮失败 → 不是偶发抖动`，恢复时打 `[趋势] ... 已恢复`。
+同一件事只报一次（不会每轮重复喊），所以单轮抖动和持续性故障一眼可分。
+
 ## 常用命令
 
 ```bash
@@ -86,6 +92,11 @@ python3 synapse.py check -v
 # 机读模式：只出一份 JSON（time/summary/results），方便接别的脚本
 # 人类可读的表格会自动走 stderr，所以管道里只剩纯 JSON
 python3 synapse.py check --json | jq '.summary'
+
+# 报告回收: reports/ 每轮一个文件会无限长，默认只预览，--apply 才真删
+python3 synapse.py prune                       # 默认保留每类最新 200 个、且只删 7 天前的
+python3 synapse.py prune --keep 50 --days 3    # 更激进（仍只预览）
+python3 synapse.py prune --keep 50 --apply     # 真删（latest.json 永不删）
 
 # 全局一览: 目标清单 / 长跑失败统计(.outage.json) / 未解决台账
 python3 synapse.py status
@@ -224,7 +235,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 84 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 104 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

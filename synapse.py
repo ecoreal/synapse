@@ -24,11 +24,23 @@ import time
 import urllib.error
 import urllib.request
 
+# 判定层与探测层各自独立成模块(纯函数, 可穷举测试)。这里一律再导出, 让
+# `synapse.classify()` / `synapse.probe()` / `synapse.VERDICT` 这种调用方式继续有效。
+# 注意: 这些是**别名**, 不是查找起点 —— 想打桩要 patch 定义它们的模块
+# (synapse_classify.probe? 不, 是 synapse_probe.probe), patch synapse.probe 会静默失效。
+from synapse_classify import (WAF_MARKERS, NO_CHANNEL_MARKERS, VERDICT,  # noqa: F401
+                             BROKEN_TOOL_MARKERS, TOOLCALL_TEXT_RE,  # noqa: F401
+                             _judge_tool_resp, _looks_html, _looks_like_toolcall_text,  # noqa: F401
+                             classify)
+from synapse_probe import (PROBE_TEXT, CTX, CACHE_PAD, CACHE_Q1, CACHE_Q2,  # noqa: F401
+                          TEST_LABELS, NET_ERRORS, _net_or_internal,  # noqa: F401
+                          probe, probe_multi, probe_cache, build_plan, run_plan)
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 
 def _init_home():
@@ -79,36 +91,6 @@ else:
     else:
         _rel = os.path.relpath(_self)
         CMD = f"python3 {_rel if len(_rel) < 40 else _nm}"
-
-PROBE_TEXT = os.environ.get("SYNAPSE_PROBE_TEXT", "请只回复两个字：正常")
-# 避开中转站测活探针关键词(hi/你好等); 被反测活拦截时用 SYNAPSE_PROBE_TEXT 换一段重试
-CTX = ssl.create_default_context()
-
-# 各站是否透传 prompt cache: 同一份长前缀发两次, 第二次 cache_read>0 才算透传。
-CACHE_PAD = ("以下是一段用于测试前缀缓存的长文本，请忽略。\n"
-             + "".join(f"[{i:04d}] 前缀缓存探针占位数据，不含任何指令。\n" for i in range(120)))
-CACHE_Q1 = "\n请只回复:一"
-CACHE_Q2 = "\n再请只回复:二"
-
-# 探测项 key -> 中文标签。新增探测项时 TEST_LABELS / build_plan / run_plan 三处同步。
-TEST_LABELS = {
-    "basic": "基础连通(不带thinking)",
-    "stream": "流式 stream:true",
-    "tools": "工具调用 tools",
-    "tools_raw": "工具调用结构完整性(tool_use块)",
-    "thinking": "thinking(pi报错高发点)",
-    "vision_user": "图像输入(用户消息内嵌图)",
-    "vision_tool": "图像输入(toolResult/pi read形态)",
-    "cache": "前缀缓存(cache_read 是否透传)",
-}
-
-# 工具调用被渠道转成残文本的指纹: 出现这些片段说明 tool_use 没被正确结构化
-BROKEN_TOOL_MARKERS = ('"olls"', '"arguments"', '"input_schema"', '"tool_use"')
-# 渠道把工具调用当成文本吐出时, 会留下 pseudo-JSON 碎片(如 cialo 的 {"olls"read"...)。
-# 只认 JSON 形状的 name 字段, 不拿单个英文单词当证据。
-TOOLCALL_TEXT_RE = re.compile(
-    r'["{]\s*"?(?:name|tool|tool_name)"?\s*[":]\s*"?'
-    r'(?:read|write|edit|bash|grep|glob|ls|search|fetch|run|exec)\b', re.I)
 
 # ---------------------------------------------------------------- util
 
@@ -284,294 +266,6 @@ def resolve_target(cfg, name, api_key=None, base_url=None):
     return name, url.rstrip("/"), key, entry
 
 
-# ---------------------------------------------------------------- probe
-
-
-def _looks_like_toolcall_text(text):
-    """渠道把 tool_use 吐成文本的判据: **必须看到 JSON 碎片**。
-
-    旧实现用 `"read" in text` / 去引号后的 `arguments in text`,
-    结果正文里出现 “I have already read the file” 或
-    “pass the arguments” 就把好好的站判成工具链路损坏(❌)。
-    宁可漏报(归为 tool_call_text 已足够提示), 也不能误报弃用一个正常的站。
-    """
-    if any(mk in text for mk in BROKEN_TOOL_MARKERS):   # 保留引号, 严格匹配
-        return True
-    return bool(TOOLCALL_TEXT_RE.search(text))
-
-
-def _judge_tool_resp(kind, j, raw, snippet):
-    """带 tools 的探测: 看响应里到底是合规的 tool_use 块还是渠道吐出来的残文本。"""
-    blocks = j.get("content") or []
-    has_tool = any(isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks)
-    has_text = any(isinstance(b, dict) and b.get("type") == "text" for b in blocks)
-    if has_tool:
-        return "ok_tool_use", snippet
-    if has_text:
-        text = " ".join(b.get("text", "") for b in blocks
-                         if isinstance(b, dict) and b.get("type") == "text")
-        if _looks_like_toolcall_text(text):
-            return "tool_call_broken", text[:220]
-        return "tool_call_text", text[:220]
-    return kind, snippet
-
-
-def probe(url, key, model, thinking=False, tools=False, stream=False, timeout=60,
-          image=False, image_form="user", use_real_image=None):
-    """对 /v1/messages 做一次真实探测，返回结构化结果。"""
-    body = {
-        "model": model,
-        "max_tokens": 1024 if thinking else 64,
-        "messages": [{"role": "user", "content": PROBE_TEXT}],
-    }
-    if thinking:
-        body["thinking"] = {"type": "enabled", "budget_tokens": 512}
-    if tools:
-        body["tools"] = [{
-            "name": "bash", "description": "Execute a bash command",
-            "input_schema": {"type": "object",
-                             "properties": {"command": {"type": "string"}},
-                             "required": ["command"]},
-        }]
-    if stream:
-        body["stream"] = True
-    if image:
-        import base64, io
-        try:
-            from PIL import Image
-            im = Image.new("RGB", (64, 64), (30, 144, 255))
-            buf = io.BytesIO(); im.save(buf, "PNG")
-            b64 = base64.b64encode(buf.getvalue()).decode()
-        except ImportError:
-            import zlib, struct
-            def chunk(t, d):
-                c = t + d
-                return struct.pack(">I", len(d)) + c + struct.pack(">I", zlib.crc32(c))
-            raw = b"".join(b"\x00" + b"\x1e\x90\xff" * 64 for _ in range(64))
-            png = (b"\x89PNG\r\n\x1a\n"
-                   + chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 64, 8, 2, 0, 0, 0))
-                   + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
-            b64 = base64.b64encode(png).decode()
-        img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}
-        if use_real_image:
-            try:
-                with open(use_real_image, "rb") as fh:
-                    real = fh.read()
-                ext = os.path.splitext(use_real_image)[1].lower()
-                mt = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                      ".webp": "image/webp", ".gif": "image/gif"}.get(ext, "image/png")
-                b64 = base64.b64encode(real).decode()
-                img = {"type": "image", "source": {"type": "base64",
-                                                  "media_type": mt, "data": b64}}
-            except OSError:
-                pass  # 读图失败就静默回退内置色块
-        if image_form == "tool":
-            # pi read 工具的真实形态: 图片经 tool_result 回传
-            body["tools"] = [{"name": "read", "description": "read file",
-                              "input_schema": {"type": "object",
-                                               "properties": {"path": {"type": "string"}}}}]
-            body["max_tokens"] = 128
-            body["messages"] = [
-                {"role": "user", "content": [{"type": "text", "text": "说出图里颜色"}]},
-                {"role": "assistant", "content": [{"type": "tool_use", "id": "t1",
-                                                   "name": "read", "input": {"path": "x.png"}}]},
-                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
-                                              "content": [img]}]},
-            ]
-        else:
-            body["messages"][0]["content"] = [
-                {"type": "text", "text": "这张图是什么颜色？只回答颜色"}, img,
-            ]
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        f"{url}/v1/messages", data=data, method="POST",
-        headers={"x-api-key": key, "authorization": f"Bearer {key}",
-                 "anthropic-version": "2023-06-01", "content-type": "application/json",
-                 "user-agent": "curl/8.5.0"},  # 部分站点Cloudflare封python-urllib UA
-    )
-    t0 = time.time()
-    kind, http, snippet = "ok", 0, ""
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
-            http = resp.status
-            raw = resp.read(3000).decode("utf-8", "replace")
-        snippet = raw[:220]
-        try:
-            j = json.loads(raw)
-            stop = j.get("stop_reason")
-            if stop == "max_tokens":
-                kind = "ok_truncated"
-            if tools:
-                kind, snippet = _judge_tool_resp(kind, j, raw, snippet)
-        except (ValueError, TypeError, AttributeError):
-            # 只兜"响应不是我们期望的 JSON 形状": 非 JSON(ValueError)、
-            # 顶层不是对象(AttributeError)、字段类型不对(TypeError)。
-            # _judge_tool_resp 里的 bug 会冒到外层 → internal_error, 不再被吞。
-            kind = "ok_nonjson"
-            low = raw.lower()
-            if tools and (_looks_like_toolcall_text(raw)):
-                kind, snippet = "tool_call_broken", raw[:220]
-    except urllib.error.HTTPError as e:
-        http = e.code
-        raw = e.read(2000).decode("utf-8", "replace")
-        snippet = raw[:220]
-        kind = classify(http, raw, thinking)
-    except Exception as e:                  # noqa: BLE001 —— 单条探针不该炸掉整轮
-        kind, snippet = _net_or_internal(e)
-    return {"kind": kind, "http": http, "latency_ms": int((time.time() - t0) * 1000),
-            "snippet": snippet.replace("\n", " ")}
-
-
-def probe_multi(url, key, model, prompts, timeout=60, tools=False):
-    """同一渠道连发多轮（共用前缀），用于验证 prompt cache 是否透传。
-    prompts: [str, ...]  返回 [{kind,http,latency_ms,snippet,usage,text}]
-    """
-    body = {
-        "model": model, "max_tokens": 32,
-        "tools": [{"name": "bash", "description": "Execute a bash command",
-                   "input_schema": {"type": "object",
-                                    "properties": {"command": {"type": "string"}},
-                   "required": ["command"]}}] if tools else None,
-    }
-    out = []
-    for text in prompts:
-        b = dict(body)
-        if b["tools"] is None:
-            b.pop("tools")
-        b["messages"] = [{"role": "user", "content": text}]
-        req = urllib.request.Request(
-            f"{url}/v1/messages", data=json.dumps(b).encode(), method="POST",
-            headers={"x-api-key": key, "authorization": f"Bearer {key}",
-                     "anthropic-version": "2023-06-01", "content-type": "application/json",
-                     "user-agent": "curl/8.5.0"})
-        t0 = time.time()
-        kind, http, snippet, usage, text_out = "ok", 0, "", {}, ""
-        try:
-            with urllib.request.urlopen(req, timeout=timeout, context=CTX) as resp:
-                http = resp.status
-                raw = resp.read(4000).decode("utf-8", "replace")
-            snippet = raw[:220]
-            try:
-                j = json.loads(raw)
-                usage = j.get("usage") or {}
-                blocks = j.get("content") or []
-                text_out = " ".join(x.get("text", "") for x in blocks
-                                    if isinstance(x, dict) and x.get("type") == "text")
-                if j.get("stop_reason") == "max_tokens":
-                    kind = "ok_truncated"
-            except (ValueError, TypeError, AttributeError):
-                kind = "ok_nonjson"
-        except urllib.error.HTTPError as e:
-            http = e.code
-            raw = e.read(2000).decode("utf-8", "replace")
-            snippet = raw[:220]
-            kind = classify(http, raw, False)
-        except Exception as e:             # noqa: BLE001
-            kind, snippet = _net_or_internal(e)
-        out.append({"kind": kind, "http": http, "snippet": snippet.replace("\n", " "),
-                    "usage": usage, "text": text_out,
-                    "latency_ms": int((time.time() - t0) * 1000)})
-    return out
-
-
-# WAF/CDN 拦截页指纹(403 不等于 key 错: 很多站返回 HTML 拦截页)
-WAF_MARKERS = (
-    "访问已被拦截", "访问被拦截", "访问受限", "请求被拦截", "该页面无法访问",
-    "just a moment", "attention required", "cloudflare", "cf-error",
-    "error code: 1010", "captcha", "safeline", "waf", "request blocked",
-    "blocked by", "incapsula", "akamai",
-)
-# 模型名/分组无渠道的指纹(不是真的上游崩了)
-NO_CHANNEL_MARKERS = (
-    "无可用渠道", "无可用分组", "没有可用渠道", "model_not_found",
-    "model not found", "no available channel", "unknown model",
-    "does not exist", "invalid model", "模型不存在",
-)
-
-
-def _looks_html(raw):
-    """响应体像网页而不是 API JSON → 基本就是网关/拦截页。"""
-    s = raw.lstrip()[:300].lower()
-    return s.startswith("<!doctype") or s.startswith("<html") or "<head>" in s \
-        or "<title>" in s
-
-
-def classify(http, raw, thinking_sent):
-    """按证据强弱判种类。顺序很关键:
-    WAF/拦截页 > 无渠道 > 反测活 > 鉴权 > thinking > 参数 > 限流 > 5xx。
-    早期版本把 401/403 放在最前, 导致 HTML 拦截页被误报"key无效/欠费",
-    用户会白去换 key。现在先看响应体证据, 再看状态码。"""
-    low = raw.lower()
-    # 1) WAF/CDN 拦截: 指纹命中, 或 4xx 返回网页(API 不可能返回 HTML 正常体)
-    if any(m in low for m in WAF_MARKERS) or (http >= 400 and _looks_html(raw)):
-        return "waf_blocked"
-    # 2) 模型名/分组没渠道: 503 里也可能带这个, 不能笼统算 5xx
-    if any(m in low for m in NO_CHANNEL_MARKERS):
-        return "no_channel"
-    if "测活" in raw or "探针" in raw or "anti_probe" in low:
-        return "anti_probe"
-    # 3) 真鉴权问题: 状态码 + 不是网页(前面已排除)
-    if http in (401, 403):
-        return "auth_failed"
-    if http == 503 and "auth_unavailable" in low:
-        return "auth_unavailable"
-    if http == 400 and "upstream" in low:
-        return "thinking_unsupported" if thinking_sent else "upstream_400"
-    if http == 400:
-        return "bad_request"
-    if http == 429:
-        return "rate_limited"
-    if http >= 500:
-        return "server_error"
-    return f"http_{http}"
-
-
-VERDICT = {
-    "ok": "✅ 正常",
-    "ok_truncated": "✅ 正常(回复被max_tokens截断,无碍)",
-    "ok_nonjson": "✅ 通了但响应不是JSON",
-    "ok_tool_use": "✅ 工具调用正常(合规 tool_use 块)",
-    "tool_call_text": "⚠️ 模型把工具调用写成了文本(claude能自己纠正,但说明渠道转译可疑)",
-    "tool_call_broken": "❌ 工具调用被渠道破坏: 吐成坏JSON文本 → 这种站不能做agent任务(只适合纯聊天)",
-    "cache_passthrough": "✅ 前缀缓存透传(cache_read>0, 省钱)",
-    "cache_miss": "⚠️ 前缀缓存不传(cache_read=0) → pi 每轮全价重算, 这正是 issue#3",
-    "auth_failed": "❌ 鉴权失败: key无效或欠费",
-    "waf_blocked": "⚠️ 被Cloudflare/WAF拦截(返回拦截网页,非key问题;pi实际请求若也拦截则需换出口)",
-    "no_channel": "❌ 模型名在该分组下无可用渠道",
-    "anti_probe": "⚠️ 被反测活拦截(探测文案命中关键词, 用 SYNAPSE_PROBE_TEXT 换一段)",
-    "thinking_unsupported": "❌ 渠道不支持thinking参数 → 把pi里该模型 reasoning 设为 false",
-    "upstream_400": "⚠️ 上游400(参数兼容性问题,跑 diagnose 看细节)",
-    "bad_request": "❌ 请求被拒(400,渠道不认这个参数/字段)",
-    "auth_unavailable": "❌ 站侧无可用上游(auth_unavailable, 渠道侧账号掉了/欠费)",
-    "rate_limited": "⚠️ 限流(429),稍后重试",
-    "server_error": "⚠️ 上游5xx,渠道不稳",
-    "timeout": "❌ 超时",
-    "conn_error": "❌ 连接失败(DNS/网络/TLS)",
-    "config_error": "❌ 目标配置不完整(缺 base_url/api_key) → 该站本轮根本没被检查",
-    # 这一条永远不该出现在正常报告里; 出现就说明是 Synapse 自己的 bug, 别去折腾中转站。
-    "internal_error": "🐞 Synapse 内部错误(不是站的问题!) → 这是本程序的 bug, 请带着这一行提 issue",
-}
-
-# 网络层可预期异常。只有这些才配被解释成"站方/链路有问题"。
-# 其它异常(_net_or_internal 会判成 internal_error)一律是我们自己的 bug:
-# 旧实现 catch Exception 全算 conn_error, 我们自己的 KeyError 会被报成"站连不上",
-# 用户就去追一个本该健康的站 —— 这是最坏的一种假阳性。
-NET_ERRORS = (urllib.error.URLError, TimeoutError, ssl.SSLError,
-              http.client.HTTPException, OSError)
-
-
-def _net_or_internal(e):
-    """异常分诊: 网络问题 → timeout/conn_error; 我们自己的 bug → internal_error。
-
-    注意不吞异常语义: 这里只是给异常**贴标签**, 不是掩盖。internal_error 会
-    在报告里显眼地标成"不是站的问题", 并让整轮检查算异常(退出码 1)。
-    """
-    snip = f"{type(e).__name__}: {e}"
-    if isinstance(e, NET_ERRORS):
-        return ("timeout" if "timed out" in str(e).lower() else "conn_error"), snip
-    return "internal_error", snip
-
-
 # ---------------------------------------------------------------- output
 
 class SynapseExit(Exception):
@@ -664,79 +358,6 @@ def targets_of(cfg, args):
     return out
 
 
-def build_plan(scope, extra=None):
-    """按子命令返回要跑的测试项 key 列表(与 TEST_LABELS 顺序一致)。"""
-    if scope == "diagnose":
-        plan = ["basic", "stream", "tools", "tools_raw", "thinking"]
-        for k in (extra or []):
-            if k in TEST_LABELS and k not in plan:
-                plan.append(k)
-        return plan
-    plan = ["basic"]
-    for k in (extra or []):
-        if k in TEST_LABELS and k not in plan:
-            plan.append(k)
-    return plan
-
-
-def run_plan(url, key, model, plan, timeout=60, image_file=None):
-    """按 plan 逐项探测, 返回 {test_key: result}。"""
-    kw = {"timeout": timeout}
-    mapping = {
-        "basic": {},
-        "stream": {"stream": True},
-        "tools": {"tools": True},
-        "tools_raw": {"tools": True},
-        "thinking": {"thinking": True},
-        "vision_user": {"image": True, "use_real_image": image_file},
-        "vision_tool": {"image": True, "image_form": "tool", "use_real_image": image_file},
-    }
-    out = {}
-    for k in plan:
-        if k == "cache":
-            out[k] = probe_cache(url, key, model, timeout=timeout)
-            continue
-        try:
-            out[k] = probe(url, key, model, **mapping[k], **kw)
-        except Exception as e:             # noqa: BLE001
-            kind, snip = _net_or_internal(e)
-            out[k] = {"kind": kind, "http": 0, "latency_ms": 0, "snippet": snip}
-    return out
-
-
-def probe_cache(url, key, model, timeout=60, samples=3):
-    """三次同前缀请求, 看 cache_read_input_tokens 是否 > 0。
-    取最优轮次判定(致少一轮读到了就算透传)，避免被单次 429/抖动带偏。
-    判定:
-      cache_passthrough — 至少一轮读到缓存(站方透传 prompt cache)
-      cache_miss        — 全部为 0(站方不透传，pi 会反复全价重算)
-    """
-    prompts = [CACHE_PAD + CACHE_Q1, CACHE_PAD + CACHE_Q2, CACHE_PAD + CACHE_Q1][:max(3, samples)]
-    try:
-        rows = probe_multi(url, key, model, prompts, timeout=timeout)
-    except Exception as e:                 # noqa: BLE001
-        kind, snip = _net_or_internal(e)
-        return {"kind": kind, "http": 0, "latency_ms": 0, "snippet": snip}
-    first, second = rows[0], rows[-1]
-    if first["kind"] not in ("ok", "ok_truncated", "ok_nonjson"):
-        return {**first, "detail": "第一轮就失败，无法判缓存"}
-    best = 0
-    for r in rows:
-        u = r.get("usage") or {}
-        best = max(best, u.get("cache_read_input_tokens") or u.get("cache_read_tokens") or 0)
-    u2 = second.get("usage") or {}
-    read = best
-    u1 = first.get("usage") or {}
-    detail = (f"第1轮 in={u1.get('input_tokens')} cr={u1.get('cache_read_input_tokens', 0)} | "
-              f"第2轮 in={u2.get('input_tokens')} cr={read} (共 {len(rows)} 轮)")
-    kind = "cache_passthrough" if read else "cache_miss"
-    if first["kind"] == "ok_truncated" or second["kind"] == "ok_truncated":
-        pass  # 截断不影响缓存判定
-    return {"kind": kind, "http": second.get("http", 200),
-            "latency_ms": first["latency_ms"], "snippet": detail, "detail": detail,
-            "usage": u2, "rounds": [{"usage": r.get("usage"), "ms": r["latency_ms"]} for r in rows]}
-
-
 def _auto_issue_from_rows(rows, say=None):
     """把本轮体检里的“值得记一笔”的异常自动写入台账。
     只报真正需要行动的问题，避免噪声刷屏:
@@ -823,6 +444,28 @@ def _streak_hints(min_streak=2):
             hints.append(f"[!] {t}/{m} 已连续 {st['streak']} 轮失败(最近 {st.get('last_kind')})"
                          f" → 可考虑临时禁用: 在 config.json 把 {t} 的 enabled 改 false")
     return hints
+
+
+def _streak_transitions(prev, cur, min_streak=2):
+    """比较两轮 .outage.json, 找出"刚转坏/刚恢复"的目标||模型。
+
+    单轮明细里"第 1 轮失败"和"连续第 5 轮失败"长得一模一样, 但前者是抖动、
+    后者是故障。只在跨越阈值的那一轮报一次, 避免每轮重复喊。
+    """
+    out = []
+    for key, st in (cur or {}).items():
+        if key not in (prev or {}):
+            continue                      # 首轮出现的 key 没有"上一轮", 无从判断趋势
+        before = prev[key].get("streak", 0)
+        after = st.get("streak", 0)
+        t, m = key.split("||", 1) if "||" in key else (key, "")
+        if before < min_streak <= after:
+            out.append({"key": key, "target": t, "model": m, "dir": "down",
+                        "streak": after, "kind": st.get("last_kind", "")})
+        elif before >= min_streak and after == 0:
+            out.append({"key": key, "target": t, "model": m, "dir": "up",
+                        "streak": before, "kind": st.get("last_kind", "")})
+    return out
 
 
 def _outage_track(rows):
@@ -924,6 +567,15 @@ def cmd_check(args, ctx):
         for m in ms:
             for tk in plan:
                 jobs.append((n, u, k, m, tk))
+    if not jobs and not cfg_errors:
+        # "合计 0 项" + 退出 0 等于告诉用户"刚检查过, 一切正常" —— 监控工具最坏的输出。
+        sel = [f"--target {args.target}" if getattr(args, "target", None) else "",
+               f"--model {args.model}" if getattr(args, "model", None) else ""]
+        sel = [x for x in sel if x]
+        avail = ", ".join(sorted((cfg.get("targets") or {}))) or "(配置里没有任何目标)"
+        ctx.die(f"筛选条件没有命中任何目标/模型: {'、'.join(sel) or '配置里没有启用的目标'}\n"
+                f"  可用目标: {avail}", code=2)
+
     if args.jobs > 1 and len(jobs) > 1:
         with futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
             futs = [ex.submit(one, *j) for j in jobs]
@@ -971,11 +623,22 @@ def cmd_check(args, ctx):
     # 落盘
     os.makedirs(REPORTS, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    outage_path = os.path.join(HOME, ".outage.json")
+    prev_snap = load_json(outage_path, {}) or {}
     stat = _outage_track(rows)
+    transitions = _streak_transitions(prev_snap, load_json(outage_path, {}) or {})
+    for tr in transitions:
+        if tr["dir"] == "down":
+            ctx.say(f"[趋势] {tr['target']}/{tr['model']} 连续 {tr['streak']} 轮失败"
+                    f"({tr['kind']}) → 不是偶发抖动")
+        else:
+            ctx.say(f"[趋势] {tr['target']}/{tr['model']} 已恢复"
+                    f"(此前连续 {tr['streak']} 轮失败)")
     if args.as_json:
-        ctx.json({"time": now(), "summary": stat, "results": rows})
+        ctx.json({"time": now(), "summary": stat, "results": rows,
+                  "transitions": transitions})
     payload = {"time": now(), "summary": stat, "results": rows, "dirty": stale,
-               "partial": partial}
+               "partial": partial, "transitions": transitions}
     save_json(os.path.join(REPORTS, f"check-{stamp}.json"), payload)
     # latest.json 只收全量快照: 带 --target/--model 的定向抽查不能把全景图盖成残缺的
     if not payload["partial"]:
@@ -1349,6 +1012,84 @@ def cmd_doctor(args, ctx):
         else:
             ctx.say("有故障项, 先按 → 后面的提示修。")
     return 1 if summary["fail"] else 0
+
+
+# 报告文件名形如 check-20261021-120000.json / diagnose-...; 后缀即时间, 可直接排序
+_REPORT_RE = re.compile(r"^(?P<prefix>[a-z]+)-(?P<ts>\d{8}-\d{6})\.json$")
+
+
+def _report_groups():
+    """按前缀分组, 新的在前。latest.json 不匹配此模式, 因此天然不会被当成候选。"""
+    try:
+        names = os.listdir(REPORTS)
+    except OSError:
+        return {}
+    groups = {}
+    for n in names:
+        m = _REPORT_RE.match(n)
+        if not m:
+            continue
+        groups.setdefault(m.group("prefix"), []).append((m.group("ts"), n))
+    for g in groups.values():
+        g.sort(reverse=True)
+    return groups
+
+
+def cmd_prune(args, ctx):
+    """回收历史报告。默认只预览 —— 删东西一律要 --apply, 与 fix 同规矩。
+
+    删除条件是"排名在保留数之外" **且** "mtime 早于 --days":
+    两个条件同时满足才删, 避免刚出问题想看报告时把新鲜证据删掉。
+    """
+    groups = _report_groups()
+    cutoff = time.time() - args.days * 86400 if args.days > 0 else None
+    victims, kept = [], 0
+    for prefix in sorted(groups):
+        for idx, (_ts, name) in enumerate(groups[prefix]):
+            path = os.path.join(REPORTS, name)
+            try:
+                size = os.path.getsize(path)
+                old = True if cutoff is None else os.path.getmtime(path) < cutoff
+            except OSError:
+                continue                       # 读不到就当它不是我们的文件, 不动
+            if idx >= args.keep and old:
+                victims.append({"name": name, "prefix": prefix, "size": size})
+            else:
+                kept += 1
+    freed = sum(v["size"] for v in victims)
+
+    if ctx.as_json:
+        ctx.json({"dry_run": not args.apply, "reports_dir": REPORTS,
+                  "keep": args.keep, "days": args.days,
+                  "kept": kept, "would_delete": victims, "freed_bytes": freed})
+        if not args.apply:
+            return 0
+
+    if not victims:
+        ctx.say(f"[i] 没有需要清理的报告({kept} 个文件都在保留范围内)")
+        return 0
+
+    detail = f"保留 {kept} 个, 清理 {len(victims)} 个, 可释放 {freed / 1024:.1f} KB"
+    if not args.apply:
+        ctx.say(f"[预览] {REPORTS}")
+        ctx.say(f"  {detail}")
+        for v in victims[:10]:
+            ctx.say(f"  - {v['name']}")
+        if len(victims) > 10:
+            ctx.say(f"  ... 还有 {len(victims) - 10} 个")
+        ctx.say(f"\n(仅预览。确认删除请加 --apply; latest.json 永不被删除)")
+        return 0
+
+    failed = 0
+    for v in victims:
+        try:
+            os.remove(os.path.join(REPORTS, v["name"]))
+        except OSError as e:
+            failed += 1
+            if failed == 1:
+                ctx.say(f"[!] 删除失败: {v['name']}: {e}")
+    ctx.say(f"[完成] {detail}" + (f", 失败 {failed} 个" if failed else ""))
+    return 1 if failed else 0
 
 
 def _synced_log_line():
@@ -1864,6 +1605,15 @@ def main(argv=None, out=None, err=None):
     p.add_argument("--log", action="store_true",
                    help="把最近一次体检摘要回写到 STATIONS.md 日志区")
     p.set_defaults(fn=cmd_sync_stations)
+
+    p = sub.add_parser("prune", help="清理历史报告(默认只预览, --apply 才真删)")
+    p.add_argument("--keep", type=int, default=200,
+                   help="每个前缀(如 check-/diagnose-)保留最新多少个(默认 200)")
+    p.add_argument("--days", type=float, default=7.0,
+                   help="只删这么多天以前的文件(默认 7, 0 表示不限年龄)")
+    p.add_argument("--apply", action="store_true", help="真的删除(用户下令才用)")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.set_defaults(fn=cmd_prune)
 
     p = sub.add_parser("doctor", help="自检: 数据目录/权限/定时器/新鲜度/台账(只读, 不联网)")
     p.add_argument("--json", dest="as_json", action="store_true")

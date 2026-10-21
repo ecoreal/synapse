@@ -1,3 +1,14 @@
+synapse (1.8.0) unstable; urgency=medium
+
+  * 新增 prune: 回收历史报告(默认预览, --apply 才删; latest.json 永不删)
+  * check 输出跨轮趋势: 连续 2 轮失败报"转坏", 恢复报"已恢复"
+  * check 的 --target/--model 没命中时以退出码 2 结束(不再假装"0 项=健康")
+  * 按职责拆成三层: synapse.py(CLI/状态) + synapse_classify.py(判定)
+    + synapse_probe.py(探测); 判定层为纯函数, 可穷举测试
+  * 测试 84 -> 103 项; 打包脚本增加"解包能否运行"自检
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 18:10:00 +0800
+
 synapse (1.7.0) unstable; urgency=medium
 
   * 新增 doctor 子命令: 自检(只读, 不联网)。能诊断中转站的工具原先诊断不了

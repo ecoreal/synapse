@@ -10,11 +10,13 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import synapse  # noqa: E402
+import synapse as synapse_mod  # noqa: E402
 
 # 全模块统一隔离数据目录。教训: 之前 test_disappeared_target_marks_dirty 会经
 # mark_dirty() 把 "目标被移除/禁用: ghost" 写进用户真实的
@@ -420,6 +422,244 @@ class TestStatusFreshness(unittest.TestCase):
         self.assertIn("最近一次体检", self.out.getvalue())
 
 
+class TestEmptySelection(unittest.TestCase):
+    """筛选条件一个都没选中时, 不能输出"合计 0 项"然后退出 0。
+
+    监控工具最坏的输出是"看起来没事": 用户敲错模型名, 拿到的却是一份
+    干净的 0 项报告 —— 比报错难查得多(还以为刚检查过)。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD", "run_plan")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {
+            "base_url": "https://a.invalid", "api_key": "sk-1",
+            "models": ["m"], "enabled": True, "default": True}}})
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def test_unmatched_model_is_a_usage_error(self):
+        rc = self._run("check", "--target", "t", "--model", "nope")
+        self.assertEqual(rc, 2, "筛选为空必须以用法错误退出, 而不是 0")
+        self.assertIn("nope", self.err.getvalue() + self.out.getvalue())
+
+    def test_unmatched_target_is_a_usage_error(self):
+        self.assertEqual(self._run("check", "--target", "nope"), 2)
+
+    def test_matched_filter_still_works(self):
+        synapse.run_plan = lambda url, key, model, plan, **kw: {
+            k: {"kind": "ok", "http": 200, "latency_ms": 1, "snippet": "ok"} for k in plan}
+        self.assertEqual(self._run("check", "--target", "t", "--model", "m"), 0)
+
+
+class TestStreakTransitions(unittest.TestCase):
+    """跨轮趋势: 单轮明细里"第 1 轮失败"和"连续第 5 轮失败"长得一样,
+    但前者是抖动、后者是故障。转坏/恢复这两个"事件"才值得提醒。
+    """
+
+    def test_down_when_crossing_threshold(self):
+        prev = {"t||m": {"streak": 1, "last_kind": "timeout"}}
+        cur = {"t||m": {"streak": 2, "last_kind": "timeout"}}
+        tr = synapse._streak_transitions(prev, cur)
+        self.assertEqual(len(tr), 1)
+        self.assertEqual(tr[0]["dir"], "down")
+        self.assertEqual((tr[0]["target"], tr[0]["model"]), ("t", "m"))
+
+    def test_no_transition_below_threshold(self):
+        prev = {"t||m": {"streak": 0}}
+        cur = {"t||m": {"streak": 1}}
+        self.assertEqual(synapse._streak_transitions(prev, cur), [])
+
+    def test_no_repeat_while_still_down(self):
+        prev = {"t||m": {"streak": 3}}
+        cur = {"t||m": {"streak": 4}}
+        self.assertEqual(synapse._streak_transitions(prev, cur), [],
+                         "已经报过转坏就不该每轮再喊一次")
+
+    def test_up_on_full_recovery(self):
+        prev = {"t||m": {"streak": 3}}
+        cur = {"t||m": {"streak": 0}}
+        tr = synapse._streak_transitions(prev, cur)
+        self.assertEqual(tr[0]["dir"], "up")
+        self.assertEqual(tr[0]["streak"], 3)
+
+    def test_new_key_is_not_a_transition(self):
+        self.assertEqual(synapse._streak_transitions({}, {"t||m": {"streak": 2}}), [])
+
+
+class TestTrendIntegration(unittest.TestCase):
+    """跑两轮 check, 第二轮应该把"转坏"讲出来。"""
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD", "run_plan")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS, exist_ok=True)
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {
+            "base_url": "https://a.invalid", "api_key": "sk-1",
+            "models": ["m"], "enabled": True, "default": True}}})
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _round(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def _fail_probe(self, kind="timeout"):
+        synapse.run_plan = lambda url, key, model, plan, **kw: {
+            k: {"kind": kind, "http": 0, "latency_ms": 1, "snippet": "x"} for k in plan}
+
+    def _ok_probe(self):
+        synapse.run_plan = lambda url, key, model, plan, **kw: {
+            k: {"kind": "ok", "http": 200, "latency_ms": 1, "snippet": "ok"} for k in plan}
+
+    def test_second_failure_round_is_called_out(self):
+        self._fail_probe()
+        self._round("check")
+        self.assertNotIn("连续 2 轮", self.out.getvalue())
+        self._round("check")
+        self.assertIn("连续 2 轮失败", self.out.getvalue())
+
+    def test_recovery_is_called_out(self):
+        self._fail_probe()
+        self._round("check"); self._round("check")
+        self._ok_probe()
+        self._round("check")
+        self.assertIn("已恢复", self.out.getvalue())
+
+    def test_transitions_land_in_the_json_payload(self):
+        self._fail_probe()
+        self._round("check", "--json")
+        self._round("check", "--json")
+        import json as _j
+        d = _j.loads(self.out.getvalue())
+        self.assertTrue(any(t["dir"] == "down" for t in d["transitions"]))
+
+
+class TestPrune(unittest.TestCase):
+    """报告轮转: reports/ 会无限增长(每次 check 一个文件), 得有个回收口。
+
+    规矩和 fix 一致: 默认只预览, --apply 才真删; latest.json 永不被删
+    (它是 status/doctor 判断新鲜度的唯一依据)。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in ("HOME", "REPORTS", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def _mk(self, n_check=0, n_diag=0, day=30):
+        import datetime as dt
+        for i in range(n_check):
+            name = f"check-2026010{i + 1}-120000.json"
+            path = os.path.join(synapse.REPORTS, name)
+            synapse.save_json(path, {"summary": {}})
+            self._age(path, day)
+        for i in range(n_diag):
+            name = f"diagnose-2026010{i + 1}-120000.json"
+            path = os.path.join(synapse.REPORTS, name)
+            synapse.save_json(path, {"conclusions": []})
+            self._age(path, day)
+        synapse.save_json(os.path.join(synapse.REPORTS, "latest.json"), {"time": "x"})
+
+    def _age(self, path, days):
+        t = time.time() - days * 86400
+        os.utime(path, (t, t))
+
+    def _names(self):
+        return sorted(os.listdir(synapse.REPORTS))
+
+    def test_dry_run_deletes_nothing(self):
+        self._mk(n_check=5)
+        self.assertEqual(self._run("prune", "--keep", "2"), 0)
+        self.assertEqual(len([n for n in self._names() if n.startswith("check-")]), 5)
+        self.assertIn("--apply", self.out.getvalue())
+
+    def test_apply_keeps_newest_n(self):
+        self._mk(n_check=5)
+        self.assertEqual(self._run("prune", "--keep", "2", "--apply"), 0)
+        left = [n for n in self._names() if n.startswith("check-")]
+        self.assertEqual(left, ["check-20260104-120000.json", "check-20260105-120000.json"])
+
+    def test_latest_json_is_never_deleted(self):
+        self._mk(n_check=3)
+        self._run("prune", "--keep", "0", "--apply")
+        self.assertIn("latest.json", self._names())
+
+    def test_other_files_are_not_touched(self):
+        self._mk(n_check=3)
+        for extra in ("config.json", "STATIONS.md", "issues.json"):
+            open(os.path.join(synapse.REPORTS, extra), "w").close()
+        self._run("prune", "--keep", "0", "--apply")
+        names = self._names()
+        for extra in ("config.json", "STATIONS.md", "issues.json"):
+            self.assertIn(extra, names)
+
+    def test_recent_files_survive_the_age_cutoff(self):
+        self._mk(n_check=5, day=0)          # 全是"刚刚"写的
+        self._run("prune", "--keep", "0", "--days", "7", "--apply")
+        self.assertEqual(len([n for n in self._names() if n.startswith("check-")]), 5)
+
+    def test_diagnose_is_pruned_independently(self):
+        self._mk(n_check=3, n_diag=3)
+        self._run("prune", "--keep", "1", "--apply")
+        self.assertEqual(len([n for n in self._names() if n.startswith("check-")]), 1)
+        self.assertEqual(len([n for n in self._names() if n.startswith("diagnose-")]), 1)
+
+    def test_json_reports_what_would_go(self):
+        self._mk(n_check=4)
+        self._run("prune", "--keep", "1", "--json")
+        import json as _j
+        d = _j.loads(self.out.getvalue())
+        self.assertTrue(d["dry_run"])
+        self.assertEqual(len(d["would_delete"]), 3)
+        self.assertGreater(d["freed_bytes"], 0)
+
+    def test_empty_reports_dir_is_fine(self):
+        self.assertEqual(self._run("prune"), 0)
+
+
 class TestTestIsolation(unittest.TestCase):
     """守门测试: 测试自身绝不能读写真实数据目录。
 
@@ -586,6 +826,24 @@ class TestDocsConsistency(unittest.TestCase):
         self.assertIn(f"({synapse.__version__})", first,
                       "changelog 最新一条不是当前版本")
 
+    def test_bash_completion_lists_every_subcommand(self):
+        """补全文件曾经漏掉 doctor/prune/status —— 和 man 页版本号一样是"没人校验"。
+
+        这里直接从 synapse.py 里抽 sub.add_parser("<name>") 的真名单, 和补全文件比对,
+        新增子命令忘了补就会红。
+        """
+        import re
+        src = open(synapse_mod.__file__, encoding="utf-8").read()
+        subs = set(re.findall(r'sub\.add_parser\(\s*"([a-z][a-z-]*)"', src))
+        self.assertTrue(subs, "没能从源码里抽到子命令列表(抽取逻辑失效了)")
+        comp = open(os.path.join(os.path.dirname(synapse_mod.__file__),
+                                 "packaging-src", "bash-completion", "synapse"),
+                    encoding="utf-8").read()
+        line = [l for l in comp.splitlines() if l.strip().startswith("subs=")][0]
+        listed = set(line.split('"')[1].split())
+        self.assertEqual(subs - listed, set(), "补全文件漏了这些子命令")
+        self.assertEqual(listed - subs, set(), "补全文件列出了已不存在的子命令")
+
     def test_version_is_a_plain_semver(self):
         import re
         self.assertRegex(synapse.__version__, r"^\d+\.\d+\.\d+$")
@@ -642,13 +900,19 @@ class TestErrorTriage(unittest.TestCase):
         self.assertEqual(r["kind"], "conn_error")
 
     def test_run_plan_does_not_disguise_bug_as_station_fault(self):
-        """run_plan 里任何一项探针炸了, 也不能一律算站挂了。"""
-        orig = synapse.probe
-        synapse.probe = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kaboom"))
+        """run_plan 里任何一项探针炸了, 也不能一律算站挂了。
+
+        注意 patch 的是 synapse_probe.probe: 拆分后 run_plan 和 probe 同住在
+        synapse_probe 模块里, 它按自己的模块全局查找 probe。patch
+        synapse.probe 会静默失效(测试照样绿, 但什么都没验证到)。
+        """
+        import synapse_probe
+        orig = synapse_probe.probe
+        synapse_probe.probe = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kaboom"))
         try:
             out = synapse.run_plan("https://a.invalid", "sk-1", "m", ["basic"], timeout=1)
         finally:
-            synapse.probe = orig
+            synapse_probe.probe = orig
         self.assertEqual(out["basic"]["kind"], "internal_error")
 
     def test_internal_error_is_not_a_station_outage(self):

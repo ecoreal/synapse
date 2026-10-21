@@ -1,4 +1,5 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.7.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.8.0" "User Commands"
+.\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
 .SH 概要
@@ -15,6 +16,10 @@ synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
 .TP
 .B check
 一次性连通性检查(支持 \-\-tools/\-\-cache/\-\-vision/\-\-json)。
+每轮结束会打印跨轮趋势: 某个 目标/模型 连续失败达到 2 轮时报"转坏",
+恢复时报"已恢复"(单轮明细看不出抖动和故障的区别)。
+若 \-\-target/\-\-model 一个都没命中, 以用法错误(退出码 2)结束 ——
+"合计 0 项 + 退出 0"会被误读成"刚检查过, 一切正常"。
 .TP
 .B watch
 周期监控(前台常驻)。
@@ -52,6 +57,14 @@ config.json 的权限(内含明文 key, 非 0600 会警告)、key_from_pi 引用
 Python 版本。
 出现故障项返回 1; 只有警告项返回 0。
 \-\-json 时输出 {time, checks:[{level,name,detail,hint}], summary}。
+.TP
+.B prune
+回收历史报告(默认只预览, 加 \-\-apply 才真删)。
+reports/ 每轮体检落一个文件, 不设上限会无限增长。
+\-\-keep N 每个前缀(如 check\-/diagnose\-)保留最新 N 个(默认 200);
+\-\-days D 只删 D 天以前的(默认 7, 0 表示不限年龄); 两个条件同时满足才删,
+避免刚出故障时把新鲜证据删掉。latest.json 永不删除。
+\-\-json 时输出 {dry_run, reports_dir, keep, days, kept, would_delete, freed_bytes}。
 .TP
 .B status
 一览: 目标清单 + 台账 + 长跑失败统计 + 最近一次全量体检的新鲜度。
