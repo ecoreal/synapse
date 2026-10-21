@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 
 def _init_home():
@@ -915,6 +915,10 @@ def _schedule_status():
     return False, note
 
 
+_RE_LEAK_SK = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
+_RE_LEAK_BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")
+
+
 def _doctor_checks(stale_hours=3.0):
     """Synapse 自检: 每项都是只读本地检查, 不联网。返回 [{level,name,detail,hint}]。"""
     rows = []
@@ -1059,7 +1063,38 @@ def _doctor_checks(stale_hours=3.0):
     else:
         add("ok", "状态文件", "可解析")
 
-    # 9. 脏标记: 目标清单改过但没做全量复查
+    # 9. 报告内容: 有没有把 key 写进文件里(旧版本没有脱敏, 站方会回显请求头)
+    leaked, loose = [], []
+    try:
+        names = sorted(n for n in os.listdir(REPORTS) if n.endswith(".json"))
+    except OSError:
+        names = []
+    for n in names[:400]:                  # 只看最近一批, doctor 不该扫全盘
+        p = os.path.join(REPORTS, n)
+        try:
+            with open(p, encoding="utf-8", errors="ignore") as f:
+                txt = f.read()
+        except OSError:
+            continue
+        if (_RE_LEAK_SK.search(txt) or _RE_LEAK_BEARER.search(txt)):
+            leaked.append(n)
+        try:
+            if os.stat(p).st_mode & 0o077:
+                loose.append(n)
+        except OSError:
+            pass
+    if leaked:
+        add("warn", "报告内容",
+            f"{len(leaked)} 个报告里含疑似密钥(如 {leaked[0]})",
+            f"删掉或改写这些文件: rm -f {REPORTS}/check-*.json (统计会从零开始)")
+    elif loose:
+        add("warn", "报告内容",
+            f"{len(loose)} 个报告对同组/其他用户可读(如 {loose[0]})",
+            f"chmod 600 {REPORTS}/*.json")
+    else:
+        add("ok", "报告内容", "未发现疑似密钥, 权限正常")
+
+    # 10. 脏标记: 目标清单改过但没做全量复查
     dirty = read_dirty()
     if dirty:
         ts, what = (dirty.split("\t", 1) + [""])[:2]
@@ -1068,7 +1103,7 @@ def _doctor_checks(stale_hours=3.0):
     else:
         add("ok", "脏标记", "无")
 
-    # 10. 运行环境
+    # 11. 运行环境
     v = sys.version_info
     if (v.major, v.minor) >= (3, 8):
         add("ok", "Python", f"{v.major}.{v.minor}.{v.micro}")
@@ -1584,6 +1619,7 @@ def cmd_report(args, ctx):
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(render_dashboard(payload))
+        chmod_private(tmp)                 # 图里有站方回显的原文, 不给别人读
         os.replace(tmp, path)              # 原子替换: 中途失败不会留下半张网页
     except OSError as e:
         ctx.die(f"[!] 写仪表盘失败: {path}: {e}")

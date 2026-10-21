@@ -19,6 +19,39 @@ import zlib
 
 from synapse_classify import (_judge_tool_resp, _looks_html, classify)
 
+import re
+
+# --- 脱敏 -------------------------------------------------------------------
+# 报告会被贴到群里/issue 里求助, 而站方完全可能在错误体里回显请求头(见过)。
+# 于是 key 跟着 snippet 落进报告文件、终端 scrollback、HTML 仪表盘。
+# 这类泄露事后发现不了, 所以必须写盘前就抹掉, 不能指望站方客气。
+_RE_SK = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
+_RE_BEARER = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}")
+_RE_FIELD = re.compile(
+    r'(?i)("(?:api[_-]?key|authorization|x-api-key|access[_-]?token|'
+    r'secret|token)"\s*:\s*)"[^"]{4,}"')
+_RE_HEADER = re.compile(r"(?i)\b(x-api-key|api[_-]?key)\s*[:=]\s*\S{4,}")
+
+
+def redact(text, secrets=()):
+    """抹掉像密钥的东西, 但保留足以定位问题的信息。
+
+    刻意不整段替换: 排查时要看到 "401 invalid key" 这种字眼,
+    全吃掉等于把证据也毁了。
+    """
+    if not text:
+        return text
+    out = str(text)
+    for sec in secrets:                    # 已知的真实 key: 精确替换
+        if sec and len(sec) >= 6:
+            out = out.replace(sec, "***")
+    out = _RE_SK.sub("sk-***", out)
+    out = _RE_BEARER.sub(lambda m: f"{m.group(1)} ***", out)
+    out = _RE_FIELD.sub(lambda m: f'{m.group(1)}"***"', out)
+    out = _RE_HEADER.sub(lambda m: f"{m.group(1)}: ***", out)
+    return out
+
+
 PROBE_TEXT = os.environ.get("SYNAPSE_PROBE_TEXT", "请只回复两个字：正常")
 # 避开中转站测活探针关键词(hi/你好等); 被反测活拦截时用 SYNAPSE_PROBE_TEXT 换一段重试
 CTX = ssl.create_default_context()
@@ -153,7 +186,7 @@ def probe(url, key, model, thinking=False, tools=False, stream=False, timeout=60
     except Exception as e:                  # noqa: BLE001 —— 单条探针不该炸掉整轮
         kind, snippet = _net_or_internal(e)
     return {"kind": kind, "http": http, "latency_ms": int((time.time() - t0) * 1000),
-            "snippet": snippet.replace("\n", " ")}
+            "snippet": redact(snippet.replace("\n", " "), (key,))}
 
 
 def probe_multi(url, key, model, prompts, timeout=60, tools=False):
@@ -202,8 +235,9 @@ def probe_multi(url, key, model, prompts, timeout=60, tools=False):
             kind = classify(http, raw, False)
         except Exception as e:             # noqa: BLE001
             kind, snippet = _net_or_internal(e)
-        out.append({"kind": kind, "http": http, "snippet": snippet.replace("\n", " "),
-                    "usage": usage, "text": text_out,
+        out.append({"kind": kind, "http": http,
+                    "snippet": redact(snippet.replace("\n", " "), (key,)),
+                    "usage": usage, "text": redact(text_out, (key,)),
                     "latency_ms": int((time.time() - t0) * 1000)})
     return out
 

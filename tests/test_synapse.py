@@ -1266,6 +1266,33 @@ class TestDoctor(unittest.TestCase):
         self._run("doctor")
         self.assertIn("30 天", self.out.getvalue())
 
+    def test_doctor_warns_when_reports_contain_a_key(self):
+        """旧版本可能已经把你的 key 写进了报告 —— 这只有 doctor 能发现。
+
+        站方在错误体里回显 Authorization 是真事; 修复只管以后的写入,
+        已经把 key 落到盘上的历史文件必须被人看见。
+        """
+        path = os.path.join(synapse.REPORTS, "check-20260101-000000.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"results": [{"snippet": "Bearer sk-leaked0123456789abcdef"}]}')
+        os.chmod(path, 0o644)
+        synapse.main(["doctor", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        names = {c["name"]: c for c in d["checks"]}
+        self.assertIn("报告内容", names)
+        self.assertEqual(names["报告内容"]["level"], "warn")
+        self.assertIn("1", names["报告内容"]["detail"])
+
+    def test_doctor_is_quiet_when_reports_are_clean(self):
+        path = os.path.join(synapse.REPORTS, "check-20260101-000000.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"results": [{"snippet": "error code: 502"}]}')
+        os.chmod(path, 0o600)
+        synapse.main(["doctor", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        names = {c["name"]: c for c in d["checks"]}
+        self.assertEqual(names["报告内容"]["level"], "ok")
+
     def test_json_output_is_parseable(self):
         self._healthy()
         self._run("doctor", "--json")
@@ -1845,6 +1872,29 @@ class TestReportHtml(unittest.TestCase):
         self.assertIn("auth_failed", html)
         self.assertIn("synapse check --target alpha", html)
 
+
+    def test_dashboard_and_reports_are_not_world_readable(self):
+        """报告里有站方回显的原文; 0664 意味着同机任何人都能读到你的站清单。"""
+        import io
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        saved = {k: getattr(synapse, k) for k in ("HOME","CONFIG","REPORTS","ISSUES","LOCK","CMD")}
+        try:
+            synapse.HOME, synapse.CMD = tmp, "synapse"
+            synapse.CONFIG = os.path.join(tmp, "config.json")
+            synapse.REPORTS = os.path.join(tmp, "reports")
+            synapse.ISSUES = os.path.join(tmp, "issues.json")
+            synapse.LOCK = os.path.join(tmp, ".lock")
+            os.makedirs(synapse.REPORTS)
+            out = os.path.join(tmp, "d.html")
+            synapse.main(["report", "--days", "0", "--out", out],
+                         out=io.StringIO(), err=io.StringIO())
+            self.assertEqual(os.stat(out).st_mode & 0o077, 0,
+                             "仪表盘对同组/其他用户可读")
+        finally:
+            for k, v in saved.items():
+                setattr(synapse, k, v)
+
     def test_default_output_path_is_reports_dashboard(self):
         synapse.main(["report", "--days", "0"], out=self.out, err=self.err)
         self.assertTrue(os.path.exists(os.path.join(synapse.REPORTS, "dashboard.html")))
@@ -1858,6 +1908,68 @@ class TestReportHtml(unittest.TestCase):
             html = f.read()
         self.assertNotIn("a<b>", html)
         self.assertIn("a&lt;b&gt;", html)
+
+
+class TestSecretRedaction(unittest.TestCase):
+    """报告会被贴到 issue / 群里求助 —— 里面绝不能有你的 key。
+
+    站方完全可能在错误体里回显请求头(见过), 于是 key 就跟着 snippet
+    落进 0664 的报告文件。这类泄露你事后根本发现不了, 所以必须在
+    写盘前脱敏, 而不是指望站方不回显。
+    """
+
+    KEY = "sk-live-TESTONLY-0123456789abcdef"
+
+    def setUp(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        key = self.KEY
+
+        class Echo(BaseHTTPRequestHandler):
+            def do_POST(self):
+                # 恶意/粗糙的站: 把 Authorization 头原样回显
+                body = json.dumps({"error": "bad key",
+                                   "echo": self.headers.get("Authorization", ""),
+                                   "api_key": key}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = HTTPServer(("127.0.0.1", 0), Echo)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def test_station_echoing_the_key_cannot_get_it_into_the_snippet(self):
+        import synapse_probe
+        row = synapse_probe.probe(f"http://127.0.0.1:{self.port}/v1/chat/completions",
+                                 self.KEY, "m")
+        self.assertNotIn(self.KEY, row["snippet"],
+                         "站方回显的 key 被原样存进了报告")
+        self.assertIn("***", row["snippet"], "脱敏后应留下可见的占位符")
+
+    def test_bearer_and_api_key_patterns_are_redacted(self):
+        import synapse_probe
+        txt = ('Authorization: Bearer abcdef0123456789abcdef '
+               '{"api_key": "abcdef0123456789"}')
+        out = synapse_probe.redact(txt)
+        self.assertNotIn("abcdef0123456789", out)
+        self.assertIn("Bearer ***", out)
+
+    def test_redaction_keeps_enough_evidence_to_be_useful(self):
+        """脱敏不能把整段吃掉: 排查需要看到 "401 invalid key" 这种信息。"""
+        import synapse_probe
+        out = synapse_probe.redact('error code: 401 invalid api key for model x')
+        self.assertIn("401", out)
+        self.assertIn("invalid api key", out)
 
 
 class TestExplain(unittest.TestCase):

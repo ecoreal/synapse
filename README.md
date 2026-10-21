@@ -21,7 +21,14 @@ pi 模型中转站的连通性监控 / 诊断 / 配置修复工具。
 > 源码目录里若还有旧数据文件，首次运行会自动复制迁移过去，原文件保留。
 > 装 Debian 包后命令就是 `synapse`（不再需要 `python3 synapse.py`）。
 
-### 数据文件坏了会怎样
+### 报告里不会有你的 key
+
+`snippet` 是站方返回的原文。中转站完全可能在错误体里回显 `Authorization` 头——这不是假设。
+报告又常被贴到群里/issue 里求助，所以探测层在**写盘前**就抹掉：已知的真实 key 精确替换、
+`sk-`/`Bearer`/`api_key` 字段一律遮蔽，但保留 `401 invalid api key` 这类足以定位问题的字眼。
+报告与仪表盘统一 0600；历史文件由 `doctor` 扫描（含疑似密钥或权限过宽都会警告）。
+
+## 数据文件坏了会怎样
 
 监控工具不能因为数据坏就瘫掉，也不能装作没发生。三类文件区别对待：
 
@@ -283,7 +290,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 155 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 161 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

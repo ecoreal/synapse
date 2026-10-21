@@ -1,3 +1,16 @@
+synapse (1.15.0) unstable; urgency=medium
+
+  * 安全: snippet 落盘前脱敏, 站方回显的 key 不会再写进报告/仪表盘
+    - 已知真实 key 精确替换; sk-/Bearer/api_key 等模式一律遮蔽
+    - 只抹密钥不整段删, 保留 "401 invalid api key" 等排查线索
+    - 探测层统一处理, 终端输出/JSON/HTML 三条路径同时受益
+  * 报告与仪表盘统一 0600(原来裸 open, 真实数据上 38 份是 0664)
+  * doctor 新增"报告内容"检查: 扫最近 400 份, 含疑似密钥或权限过宽即警告
+    —— 修好写入只能保护以后, 已经落盘的历史文件必须被人看见
+  * 测试 155 -> 161 项(含一个会用本地 HTTP 服务回显 Authorization 的端到端用例)
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 22:00:00 +0800
+
 synapse (1.14.0) unstable; urgency=medium
 
   * explain: auth_failed 会用同窗口成功轮当反证, 不再默认让人换 key
