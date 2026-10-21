@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.9.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.11.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -62,7 +62,9 @@ Python 版本。
 历史稳定性: 把 reports/ 里过去每一轮的体检结果聚合起来, 按 目标/模型 算
 成功率、最长连败、p50 延迟和主要失败原因。单轮检查回答不了"这个站值不值得
 放进 pi 长跑", 这个能。
-\-\-days N 统计窗口(默认 7, 0 = 全部); \-\-target/\-\-model 过滤; \-\-json。
+\-\-days N 统计窗口(默认 7, 0 = 全部); \-\-target/\-\-model 过滤;
+\-\-by\-station 按站汇总(用户选的是站, 不是模型; 各模型的延迟不混合, 与其给个
+错数字不如不给); \-\-json。
 样本少于 5 次时判定为"样本不足"并拒绝下结论(2 次成功不是 100% 稳)。
 三项刻意排除在成功率之外: partial 定点体检(出问题才去查, 会压低可用率)、
 internal_error(Synapse 自己的 bug, 不是站的问题)、config_error(配置没写全)。
@@ -82,6 +84,9 @@ reports/ 每轮体检落一个文件, 不设上限会无限增长。
 体检写入, 它的年龄就是心跳。超过 \-\-stale\-hours(默认 3)没有新的全量体检
 就告警 —— 否则定时器挂了, 看板会一直显示上次的全绿, 这是最误导人的状态。
 \-\-json 时多出 last_check: {time, summary, age_hours, stale}。
+另外输出 [长期稳定性] 摘要: 最近 \-\-days(默认 7)天的全量报告里各 目标/模型
+的判定计数(稳/勉强/不建议/样本不足)最差的几条, 以及被排除在可用率之外的
+Synapse 内部错误次数。\-\-json 时多出 uptime: {days, reports_used, tally, targets}。
 .SH 文件
 .TP
 .I ~/.config/synapse/STATIONS.md
@@ -102,6 +107,27 @@ sync-stations 生成的目标清单。以原子方式写入(临时文件 + fsync
 .TP
 .I ~/.config/synapse/.targets_snapshot.json
 上次体检的目标清单快照, 用于提醒"清单有变更未复查"。
+
+.SH 坏数据的处理规则
+监控工具不能因为数据坏就瘫掉, 也不能装作没发生。三类文件区别对待:
+.TP
+.I 用户配置(config.json / issues.json / pi models.json)
+损坏时直接报错退出(码 1), 并打印定位命令
+.IR "python3 -m json.tool <路径>" 。
+这类文件静默当成空配置会让人以为"一切正常", 后果比报错严重。
+.TP
+.I 历史状态(.outage.json / latest.json)
+损坏时按"还没有历史"继续跑(不阻断体检), 但
+.B doctor
+会新增一条「状态文件」检查把损坏说出来 —— 统计从零开始这件事必须可见。
+.TP
+.I 历史报告(reports/*.json)
+畸形/半截/损坏的报告在
+.B uptime
+与
+.B status
+里跳过并计数, 摘要里明确告知"另有 N 份报告无法读取(已跳过)",
+不会让一条坏文件毁掉其余统计。
 
 .SH 环境变量
 .TP

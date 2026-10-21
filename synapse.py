@@ -40,7 +40,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.9.0"
+__version__ = "1.11.0"
 
 
 def _init_home():
@@ -133,6 +133,36 @@ def load_json(path, default=None):
         return default
 
 
+def _read_state_json(path, default=None):
+    """读 Synapse 自己写的状态文件(.outage.json / latest.json)。
+
+    这些文件是原子写出来的, 正常不会坏; 但用户或别的工具手改坏时, 不该让
+    `status` 崩掉 —— 那正是"想知道现在什么状况"的时候。坏了就当没有,
+    由 doctor 的"状态文件"一项报出来(不静默)。
+    """
+    try:
+        return load_json(path, default)
+    except (ValueError, OSError):
+        return default
+
+
+def _read_user_json(path, default=None):
+    """读用户数据文件(config/issues/pi models)。
+
+    坏 JSON 必须说清"哪个文件坏了 + 怎么定位", 而不是甩一条 traceback;
+    也绝不能静默当成空文件 —— 那会让用户以为台账/配置丢了, 甚至重建覆盖掉。
+    """
+    try:
+        return load_json(path, default)
+    except ValueError as e:                 # JSONDecodeError / UnicodeDecodeError
+        raise SynapseExit(
+            f"[!] {path} 不是合法 JSON: {e}\n"
+            f"    多半是手工编辑时改坏了。修复后重试, 或从备份恢复。\n"
+            f"    定位错误位置: python3 -m json.tool {path}")
+    except OSError as e:
+        raise SynapseExit(f"[!] 无法读取 {path}: {e}")
+
+
 def save_json(path, data):
     """原子写 JSON。
 
@@ -167,9 +197,9 @@ def chmod_private(path):
 
 
 def load_pi_models():
-    d = load_json(PI_MODELS)
+    d = _read_user_json(PI_MODELS)
     if not d:
-        raise SynapseExit(f"[!] 找不到或无法解析 {PI_MODELS}")
+        raise SynapseExit(f"[!] 找不到 {PI_MODELS}")
     return d
 
 
@@ -238,7 +268,7 @@ def stations_to_config(path=STATIONS, say=None):
 
 
 def load_config():
-    cfg = load_json(CONFIG)
+    cfg = _read_user_json(CONFIG)
     if cfg is None:
         raise SynapseExit(f"[!] 缺少 {CONFIG}，先运行: {CMD} import-from-pi")
     return cfg
@@ -441,7 +471,7 @@ def _auto_issue_from_rows(rows, say=None):
 
 def _streak_hints(min_streak=2):
     """从 .outage.json 里挑出连续失败 N 轮的模型, 给"建议临时禁用"提示(不改配置)。"""
-    snap = load_json(os.path.join(HOME, ".outage.json"), {}) or {}
+    snap = _read_state_json(os.path.join(HOME, ".outage.json"), {}) or {}
     hints = []
     for key, st in sorted(snap.items()):
         if st.get("streak", 0) >= min_streak:
@@ -476,29 +506,30 @@ def _streak_transitions(prev, cur, min_streak=2):
 def _outage_track(rows):
     """累计每个 目标||模型 的成功/失败轮次和连续失败次数(.outage.json), 供 watch 长跑追踪时段性故障。"""
     GOOD = _OK_KINDS
-    snap = load_json(os.path.join(HOME, ".outage.json"), {}) or {}
+    snap = _read_state_json(os.path.join(HOME, ".outage.json"), {}) or {}
     for r in rows:
-        if r["kind"] in ("config_error", "internal_error"):
+        if r.get("kind") in ("config_error", "internal_error"):
             continue                      # 配置问题/我们自己的 bug 都不是网络故障, 不该污染连续失败计数
-        st = snap.setdefault(f"{r['target']}||{r['model']}",
+        st = snap.setdefault(f"{r.get('target')}||{r.get('model')}",
                              {"ok": 0, "fail": 0, "streak": 0, "last": "", "last_kind": ""})
-        st["last"], st["last_kind"] = now(), r["kind"]
-        if r["kind"] in GOOD:
+        st["last"], st["last_kind"] = now(), r.get("kind") or "?"
+        if r.get("kind") in GOOD:
             st["ok"] += 1
             st["streak"] = 0
-        elif r["test"] == "basic":
+        elif r.get("test") == "basic":   # 缺 test 的行(手改/半截)不算失败, 别凭空造连败
             st["fail"] += 1
             st["streak"] += 1
     save_json(os.path.join(HOME, ".outage.json"), snap)
     return {
         "total": len(rows),
-        "ok": sum(1 for r in rows if r["kind"] in GOOD),
-        "bad": sum(1 for r in rows if r["kind"] in ("auth_failed", "no_channel",
-                                                     "auth_unavailable", "config_error",
-                                                     "internal_error")),
-        "warn": sum(1 for r in rows if r["kind"] in ("tool_call_text", "cache_miss", "server_error",
-                                                      "rate_limited", "upstream_400", "waf_blocked")),
-        "dead": sum(1 for r in rows if r["kind"] in ("timeout", "conn_error", "tool_call_broken")),
+        "ok": sum(1 for r in rows if r.get("kind") in GOOD),
+        "bad": sum(1 for r in rows if r.get("kind") in ("auth_failed", "no_channel",
+                                                         "auth_unavailable", "config_error",
+                                                         "internal_error")),
+        "warn": sum(1 for r in rows if r.get("kind") in ("tool_call_text", "cache_miss",
+                                                          "server_error", "rate_limited",
+                                                          "upstream_400", "waf_blocked")),
+        "dead": sum(1 for r in rows if r.get("kind") in ("timeout", "conn_error", "tool_call_broken")),
     }
 
 
@@ -769,7 +800,7 @@ def _last_check(stale_hours=3.0):
     stale=True 意味着数据已经比阈值更旧: 定时器/任务多半挂了。
     监控工具自己死掉却继续显示"上次全绿", 是最容易让人放心的假象。
     """
-    d = load_json(os.path.join(REPORTS, "latest.json"), None)
+    d = _read_state_json(os.path.join(REPORTS, "latest.json"), None)
     if not d:
         return None
     age = _age_hours(d.get("time"))
@@ -782,12 +813,17 @@ def cmd_status(args, ctx):
     """一览全局: 目标清单 / 脏标记 / 长跑失败统计 / 未解决台账。看板式单次输出。"""
     cfg = load_config()
     db = load_issues()
-    snap = load_json(os.path.join(HOME, ".outage.json"), {}) or {}
+    snap = _read_state_json(os.path.join(HOME, ".outage.json"), {}) or {}
     dirty = read_dirty()
     last = _last_check(getattr(args, "stale_hours", 3.0))
+    up_days = getattr(args, "days", 7.0)
+    up_rows, up_used, up_bad = _uptime_stats(up_days)
     if args.as_json:
         ctx.json({"time": now(), "targets": cfg["targets"], "outage": snap,
-                  "dirty": dirty, "issues": db["issues"], "last_check": last})
+                  "dirty": dirty, "issues": db["issues"], "last_check": last,
+                  "uptime": {"days": up_days, "reports_used": up_used,
+                             "unreadable_reports": up_bad,
+                             "tally": _uptime_tally(up_rows), "targets": up_rows}})
         return 0
 
     ctx.say(f"\n=== Synapse 状态  {now()} ===")
@@ -814,6 +850,27 @@ def cmd_status(args, ctx):
         if last["stale"]:
             ctx.say(f"[!] 已经 {age:.1f}h 没有新的全量体检(阈值 {args.stale_hours}h)"
                     f" → 定时任务可能没在跑, 检查: {CMD} timer status")
+
+    # 长期稳定性: 单轮通不通之外, "这周到底稳不稳"
+    tally = _uptime_tally(up_rows)
+    if not up_rows:
+        ctx.say(f"\n[长期稳定性] 最近 {up_days:g} 天还没有全量体检报告"
+                f" → 跑 {CMD} check 攒历史")
+    else:
+        parts = [f"{k} {v}" for k, v in tally.items() if v]
+        ctx.say(f"\n[长期稳定性] 最近 {up_days:g} 天 / {up_used} 份全量报告: "
+                f"{' · '.join(parts)}")
+        worst = [r for r in up_rows if r["samples"] >= 5][:3]
+        for r in worst:
+            why = "、".join(f"{x['kind']}×{x['count']}" for x in r["reasons"][:2])
+            ctx.say(f"  {r['target']}/{r['model']}  {r['ok_rate'] * 100:.0f}%"
+                    f" 连败{r['longest_streak']}" + (f" ({why})" if why else ""))
+        if any(r["internal_errors"] for r in up_rows):
+            n = sum(r["internal_errors"] for r in up_rows)
+            ctx.say(f"  🐞 另有 {n} 次 Synapse 内部错误, 已排除在可用率之外")
+        if up_bad:
+            ctx.say(f"  [!] 另有 {up_bad} 份报告无法读取(已跳过)")
+        ctx.say(f"  详情: {CMD} uptime --days {up_days:g} / --by-station 看站级汇总")
 
     ctx.say("\n[长跑失败统计] (.outage.json, 由 check 累计)")
     if not snap:
@@ -877,9 +934,17 @@ def _doctor_checks(stale_hours=3.0):
         add("ok", "数据目录", home_abs)
 
     # 2. config.json: 存在性 + 目标数 + 默认站 + 权限(内含明文 key)
-    cfg = load_json(CONFIG, None)
+    cfg, cfg_broken = None, False
+    try:
+        cfg = load_json(CONFIG, None)
+    except ValueError as e:
+        cfg_broken = True                      # 已经报过"坏 JSON", 别再报"不存在"
+        add("fail", "config.json", f"不是合法 JSON: {e}",
+            f"定位错误位置: python3 -m json.tool {CONFIG}")
     tg = {}
-    if cfg is None:
+    if cfg_broken:
+        pass
+    elif cfg is None:
         add("fail", "config.json", f"不存在或不是合法 JSON: {CONFIG}",
             f"先运行: {CMD} import-from-pi (或 {CMD} sync-stations)")
     else:
@@ -977,7 +1042,23 @@ def _doctor_checks(stale_hours=3.0):
         else:
             add("ok", "报告目录", msg)
 
-    # 8. 脏标记: 目标清单改过但没做全量复查
+    # 8. 状态文件: 坏了会让我们"看不见"历史, 必须说出来
+    broken = []
+    for path in (os.path.join(HOME, ".outage.json"),
+                 os.path.join(REPORTS, "latest.json")):
+        if not os.path.exists(path):
+            continue
+        try:
+            load_json(path)
+        except (ValueError, OSError):
+            broken.append(os.path.basename(path))
+    if broken:
+        add("warn", "状态文件", f"损坏(已忽略, 相关统计从零开始): {', '.join(broken)}",
+            "确认无保留价值后可删除让 Synapse 重建")
+    else:
+        add("ok", "状态文件", "可解析")
+
+    # 9. 脏标记: 目标清单改过但没做全量复查
     dirty = read_dirty()
     if dirty:
         ts, what = (dirty.split("\t", 1) + [""])[:2]
@@ -986,7 +1067,7 @@ def _doctor_checks(stale_hours=3.0):
     else:
         add("ok", "脏标记", "无")
 
-    # 9. 运行环境
+    # 10. 运行环境
     v = sys.version_info
     if (v.major, v.minor) >= (3, 8):
         add("ok", "Python", f"{v.major}.{v.minor}.{v.micro}")
@@ -1089,12 +1170,26 @@ def _uptime_stats(days=7.0, target=None, model=None):
     entries = [e for e in _report_entries("check") if cutoff is None or e[0] >= cutoff]
     acc = {}
     used = 0
+    bad = 0
     for _ts, path in reversed(entries):          # 按时间正序, 便于算连败
-        d = load_json(path, {}) or {}
+        try:
+            d = load_json(path, {}) or {}
+        except (ValueError, OSError):
+            # 损坏/半截/权限不足的报告: 跳过并计数。统计历史不能因为一份坏文件而瘫痪,
+            # 但也不能装作没发生 —— 调用方会把 bad 报出来。
+            bad += 1
+            continue
+        if not isinstance(d, dict):
+            continue                      # 手改/半截的报告, 不是我们的错也不该崩
         if d.get("partial"):
             continue
+        rows_in = d.get("results")
+        if not isinstance(rows_in, list):
+            continue
         used += 1
-        for r in d.get("results") or []:
+        for r in rows_in:
+            if not isinstance(r, dict):
+                continue
             if r.get("test") not in (None, "basic"):
                 continue
             t, m = r.get("target") or "?", r.get("model") or "?"
@@ -1143,22 +1238,82 @@ def _uptime_stats(days=7.0, target=None, model=None):
         })
     # 最该看的排前面: 样本够且成功率低的优先, 样本不足沉底
     rows.sort(key=lambda r: (r["samples"] < 5, r["ok_rate"], -r["samples"]))
-    return rows, used
+    return rows, used, bad
+
+
+def _uptime_by_station(rows):
+    """把模型级结果按站聚合 —— 用户选的是站, 不是模型。
+
+    延迟不聚合: 各模型的 p50 混在一起没有意义, 与其给个错数字不如不给。
+    """
+    acc = {}
+    for r in rows:
+        a = acc.setdefault(r["target"], {"models": 0, "samples": 0, "oks": 0,
+                                         "longest": 0, "kinds": {}, "internal": 0, "cfg": 0})
+        a["models"] += 1
+        a["samples"] += r["samples"]
+        a["oks"] += r["oks"]
+        a["longest"] = max(a["longest"], r["longest_streak"])
+        a["internal"] += r["internal_errors"]
+        a["cfg"] += r["config_errors"]
+        for x in r["reasons"]:
+            a["kinds"][x["kind"]] = a["kinds"].get(x["kind"], 0) + x["count"]
+    out = []
+    for t, a in acc.items():
+        rate = (a["oks"] / a["samples"]) if a["samples"] else 0.0
+        verdict, advice = _uptime_verdict(a["samples"], rate)
+        out.append({"target": t, "models": a["models"], "samples": a["samples"],
+                    "oks": a["oks"], "fails": a["samples"] - a["oks"],
+                    "ok_rate": round(rate, 4), "longest_streak": a["longest"],
+                    "reasons": [{"kind": k, "count": c} for k, c in
+                                sorted(a["kinds"].items(), key=lambda kv: -kv[1])[:3]],
+                    "internal_errors": a["internal"], "config_errors": a["cfg"],
+                    "verdict": verdict, "advice": advice})
+    out.sort(key=lambda r: (r["samples"] < 5, r["ok_rate"], -r["samples"]))
+    return out
+
+
+def _uptime_tally(rows):
+    """数一下各判定的个数, 给 status 一行摘要用。"""
+    tally = {"稳": 0, "勉强": 0, "不建议": 0, "样本不足": 0}
+    for r in rows:
+        tally[r["verdict"]] = tally.get(r["verdict"], 0) + 1
+    return tally
 
 
 def cmd_uptime(args, ctx):
-    rows, used = _uptime_stats(args.days, getattr(args, "target", None),
-                               getattr(args, "model", None))
+    rows, used, bad = _uptime_stats(args.days, getattr(args, "target", None),
+                                    getattr(args, "model", None))
     window = f"最近 {args.days:g} 天" if args.days > 0 else "全部历史"
+    stations = _uptime_by_station(rows)
     if ctx.as_json:
         ctx.json({"days": args.days, "window": window, "reports_used": used,
-                  "targets": rows,
-                  "summary": {"targets": len(rows), "reports_used": used}})
+                  "targets": rows, "stations": stations, "unreadable_reports": bad,
+                  "summary": {"targets": len(rows), "stations": len(stations),
+                              "reports_used": used, "unreadable_reports": bad}})
         return 0
+    if bad:
+        ctx.say(f"[!] {bad} 份报告无法读取(已跳过)")
     if not rows:
         ctx.say(f"[i] {window}里没有可用的全量体检报告(共 {used} 份)")
         ctx.say(f"    先跑一次全量体检: {CMD} check")
         return 0
+    if getattr(args, "by_station", False):
+        ctx.say(f"\n=== Synapse 站级汇总  {window} / {used} 份全量报告 ===")
+        ctx.say(f"  {'站':<20} {'模型':>4} {'样本':>5} {'成功率':>7} {'最长连败':>8}  判定")
+        for r in stations:
+            ctx.say(f"  {r['target'][:20]:<20} {r['models']:>4} {r['samples']:>5} "
+                    f"{r['ok_rate'] * 100:>6.1f}% {r['longest_streak']:>8}  {r['verdict']}")
+            if r["reasons"]:
+                why = ", ".join(f"{x['kind']}×{x['count']}" for x in r["reasons"])
+                ctx.say(f"  {'':<20} └ 主要失败: {why}")
+        if not stations:
+            ctx.say("  (没有可用的全量体检报告)")
+        if bad:
+            ctx.say(f"  [!] 另有 {bad} 份报告无法读取(已跳过, 不影响其余统计)")
+        ctx.say(f"\n(i) 历史深度受 {CMD} prune 影响: 默认每类保留 200 份")
+        return 0
+
     ctx.say(f"\n=== Synapse 历史稳定性  {window} / {used} 份全量报告 ===")
     ctx.say(f"  {'目标/模型':<38} {'样本':>4} {'成功率':>7} {'最长连败':>8} {'p50':>7}  判定")
     for r in rows:
@@ -1239,7 +1394,7 @@ def cmd_prune(args, ctx):
 
 
 def _synced_log_line():
-    rep = load_json(os.path.join(REPORTS, "latest.json"), {}) or {}
+    rep = _read_state_json(os.path.join(REPORTS, "latest.json"), {}) or {}
     s = rep.get("summary") or {}
     if not s:
         return None
@@ -1544,7 +1699,7 @@ def cmd_timer(args, ctx):
 ISSUES = os.path.join(HOME, "issues.json")
 
 def load_issues():
-    d = load_json(ISSUES, {"issues": []})
+    d = _read_user_json(ISSUES, {"issues": []})
     d.setdefault("issues", [])
     return d
 
@@ -1756,6 +1911,8 @@ def main(argv=None, out=None, err=None):
     p.add_argument("--days", type=float, default=7.0, help="统计窗口天数(默认 7, 0=全部)")
     p.add_argument("--target", help="只看某个目标")
     p.add_argument("--model", help="只看某个模型")
+    p.add_argument("--by-station", dest="by_station", action="store_true",
+                   help="按站汇总(用户选的是站, 不是模型)")
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(fn=cmd_uptime)
 
@@ -1774,10 +1931,12 @@ def main(argv=None, out=None, err=None):
                    help="超过这么多小时没有全量体检就算陈旧(默认 3)")
     p.set_defaults(fn=cmd_doctor)
 
-    p = sub.add_parser("status", help="一览: 目标清单 + 台账 + 长跑失败统计 + 上次体检新鲜度")
+    p = sub.add_parser("status", help="一览: 目标清单 + 台账 + 长跑统计 + 体检新鲜度 + 长期稳定性")
     p.add_argument("--json", dest="as_json", action="store_true")
     p.add_argument("--stale-hours", type=float, default=3.0,
                    help="超过这么多小时没有全量体检就告警(默认 3)")
+    p.add_argument("--days", type=float, default=7.0,
+                   help="长期稳定性统计窗口天数(默认 7, 0=全部)")
     p.set_defaults(fn=cmd_status)
 
     ctx = Ctx(out, err)

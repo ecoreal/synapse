@@ -34,13 +34,13 @@ _synapse_completions() {
             opts="--json --stale-hours"
             ;;
         uptime)
-            opts="--days --target --model --json"
+            opts="--days --target --model --by-station --json"
             ;;
         prune)
             opts="--keep --days --apply --json"
             ;;
         status)
-            opts="--json --stale-hours"
+            opts="--json --stale-hours --days"
             ;;
         *)
             opts="--help"

@@ -6,6 +6,7 @@
 不需要网络, 不发任何请求。
 """
 import atexit
+import json
 import os
 import shutil
 import sys
@@ -420,6 +421,347 @@ class TestStatusFreshness(unittest.TestCase):
                           {"time": "????", "summary": {"total": 1}, "results": []})
         self.assertEqual(self._run("status"), 0)
         self.assertIn("最近一次体检", self.out.getvalue())
+
+
+class TestCorruptUserFiles(unittest.TestCase):
+    """用户会手改 config.json / issues.json / models.json。
+
+    改坏之后原本是裸 traceback(JSONDecodeError), 连"哪个文件坏了"都要自己从栈里找。
+    监控工具最低要求: 说清哪个文件、怎么定位、下一步做什么。
+    而且绝不能静默当作空文件 —— 那会悄悄丢掉整个台账。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "ISSUES", "REPORTS", "LOCK", "CMD", "PI_MODELS")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.PI_MODELS = os.path.join(self.tmp, "pi-models.json")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _write(self, path, text):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        self.err.seek(0); self.err.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def test_corrupt_config_explains_itself(self):
+        self._write(synapse.CONFIG, '{"targets": {oops')
+        rc = self._run("status")
+        self.assertEqual(rc, 1)
+        e = self.err.getvalue()
+        self.assertIn("不是合法 JSON", e)
+        self.assertIn("config.json", e)
+        self.assertIn("json.tool", e)
+        self.assertNotIn("Traceback", e)
+
+    def test_corrupt_config_is_not_silently_empty(self):
+        """不能被当成"没有配置" —— 那样会引导用户去 import-from-pi, 覆盖掉原文件。"""
+        self._write(synapse.CONFIG, 'garbage')
+        rc = self._run("check")
+        self.assertEqual(rc, 1)
+        self.assertNotIn("import-from-pi", self.err.getvalue())
+
+    def test_corrupt_issues_does_not_lose_ledger_silently(self):
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {"base_url": "https://t.invalid",
+            "api_key": "k", "models": ["m"], "enabled": True, "default": True}}})
+        self._write(synapse.ISSUES, '{"issues": [{"id": 1')
+        rc = self._run("issue", "list")
+        self.assertEqual(rc, 1)
+        self.assertIn("issues.json", self.err.getvalue())
+        self.assertNotIn("Traceback", self.err.getvalue())
+
+    def test_doctor_reports_corrupt_config_as_fail_row(self):
+        self._write(synapse.CONFIG, '{"bad')
+        rc = self._run("doctor")
+        self.assertEqual(rc, 1)
+        self.assertIn("不是合法 JSON", self.out.getvalue())
+        self.assertNotIn("Traceback", self.err.getvalue())
+
+    def test_corrupt_pi_models_explains_itself(self):
+        self._write(synapse.PI_MODELS, '{nope')
+        rc = self._run("import-from-pi")
+        self.assertEqual(rc, 1)
+        self.assertIn("不是合法 JSON", self.err.getvalue())
+        self.assertNotIn("Traceback", self.err.getvalue())
+
+
+class TestCorruptStateFiles(unittest.TestCase):
+    """.outage.json / latest.json 是我们自己原子写的, 正常不会坏。
+
+    但"正常不会坏"不是不防的理由: 坏掉时主命令崩了, 而用户正想看现在什么状况。
+    取舍: 坏掉就当没有(继续工作), 但必须由 doctor 报出来 —— 不能静默。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "ISSUES", "REPORTS", "LOCK", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {"base_url": "https://t.invalid",
+            "api_key": "k", "models": ["m"], "enabled": True, "default": True}}})
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        self.err.seek(0); self.err.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def test_corrupt_outage_does_not_break_status(self):
+        with open(os.path.join(synapse.HOME, ".outage.json"), "w", encoding="utf-8") as f:
+            f.write("{broken")
+        self.assertEqual(self._run("status"), 0)
+        self.assertNotIn("Traceback", self.err.getvalue())
+
+    def test_corrupt_latest_does_not_break_status(self):
+        with open(os.path.join(synapse.REPORTS, "latest.json"), "w", encoding="utf-8") as f:
+            f.write("nope")
+        self.assertEqual(self._run("status"), 0)
+        self.assertNotIn("Traceback", self.err.getvalue())
+
+    def test_corrupt_outage_does_not_break_updater(self):
+        """坏掉的 .outage.json 不能让 check 崩, 而是重建一份继续累计。"""
+        with open(os.path.join(synapse.HOME, ".outage.json"), "w", encoding="utf-8") as f:
+            f.write("{broken")
+        summary = synapse._outage_track([{"target": "t", "model": "m", "kind": "ok",
+                                         "test": "basic"}])
+        self.assertEqual(summary["ok"], 1)
+        snap = synapse.load_json(os.path.join(synapse.HOME, ".outage.json"))
+        self.assertEqual(snap["t||m"]["ok"], 1)
+
+    def test_row_without_test_key_does_not_break_updater(self):
+        """缺 test 字段的行(手改/半截报告)不该让累计逻辑抛 KeyError, 也不该被算成连败。"""
+        summary = synapse._outage_track([{"target": "t", "model": "m", "kind": "ok"}])
+        self.assertEqual(summary["ok"], 1)
+        synapse._outage_track([{"target": "t2", "model": "m2", "kind": "timeout"}])
+        st = synapse.load_json(os.path.join(synapse.HOME, ".outage.json"))["t2||m2"]
+        self.assertEqual(st["streak"], 0)
+        self.assertEqual(st["last_kind"], "timeout")
+
+    def test_doctor_reports_corrupt_state_file(self):
+        with open(os.path.join(synapse.HOME, ".outage.json"), "w", encoding="utf-8") as f:
+            f.write("{broken")
+        self._run("doctor")
+        text = self.out.getvalue()
+        self.assertIn("状态文件", text)
+        self.assertIn(".outage.json", text)
+
+
+class TestUptimeRobustness(unittest.TestCase):
+    """刚把 uptime 接进 status 之后, 一条畸形报告就能让主命令崩掉。
+
+    监控工具绝不能因为数据坏而瘫痪 —— 坏数据要跳过并出声, 不是抛异常。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in ("HOME", "CONFIG", "REPORTS", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {"base_url": "https://t.invalid",
+            "api_key": "k", "models": ["m"], "enabled": True, "default": True}}})
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _put(self, name, payload_text):
+        with open(os.path.join(synapse.REPORTS, name), "w", encoding="utf-8") as f:
+            f.write(payload_text)
+
+    def test_truncated_json_report_is_skipped_not_fatal(self):
+        self._put("check-20261021-120000.json", '{"results": [{"target": "t"')  # 半截
+        rows, used, bad = synapse._uptime_stats(7)
+        self.assertEqual((rows, used, bad), ([], 0, 1), "坏文件要计数, 不能装作没发生")
+
+    def test_non_dict_payload_is_skipped(self):
+        self._put("check-20261021-120000.json", '[1,2,3]')
+        rows, used, bad = synapse._uptime_stats(7)
+        self.assertEqual((rows, used, bad), ([], 0, 0))
+
+    def test_non_dict_rows_are_skipped(self):
+        self._put("check-20261021-120000.json",
+                  json.dumps({"results": ["basic", {"target": "t", "model": "m",
+                                                    "kind": "ok", "test": "basic"}]}))
+        rows, used, bad = synapse._uptime_stats(7)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["samples"], 1)
+
+    def test_results_not_a_list_is_skipped(self):
+        self._put("check-20261021-120000.json", json.dumps({"results": {"a": 1}}))
+        rows, used, bad = synapse._uptime_stats(7)
+        self.assertEqual((rows, used, bad), ([], 0, 0))
+
+    def test_bad_report_does_not_break_status(self):
+        self._put("check-20261021-120000.json", 'not json at all')
+        self.assertEqual(synapse.main(["status"], out=self.out, err=self.err), 0)
+
+
+class TestUptimeByStation(unittest.TestCase):
+    """用户选的是"站", 不是"模型"。模型级看完了需要一个站级汇总。"""
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        synapse.save_json(synapse.CONFIG, {"targets": {"a": {"base_url": "https://a.invalid",
+            "api_key": "k", "models": ["m1", "m2"], "enabled": True, "default": True}}})
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def _round(self, idx, spec):
+        """spec: {(target, model): kind}"""
+        import datetime as dt
+        when = dt.datetime.now() - dt.timedelta(minutes=idx)
+        rows = [{"target": t, "model": m, "kind": k, "http": 200, "latency_ms": 10,
+                 "test": "basic", "snippet": ""} for (t, m), k in spec.items()]
+        synapse.save_json(os.path.join(synapse.REPORTS,
+                                       "check-" + when.strftime("%Y%m%d-%H%M%S") + f"-{idx}.json"),
+                          {"time": when.strftime("%Y-%m-%d %H:%M:%S"),
+                           "summary": {"total": len(rows)}, "results": rows, "partial": False})
+
+    def test_station_rollup_aggregates_models(self):
+        for i in range(6):
+            self._round(i, {("a", "m1"): "ok", ("a", "m2"): "timeout"})
+        self._run("uptime", "--by-station", "--json")
+        import json as _j
+        d = _j.loads(self.out.getvalue())
+        st = d["stations"][0]
+        self.assertEqual(st["target"], "a")
+        self.assertEqual(st["samples"], 12)
+        self.assertAlmostEqual(st["ok_rate"], 0.5, places=3)
+        self.assertEqual(st["verdict"], "不建议")
+
+    def test_station_rollup_is_worst_first(self):
+        for i in range(6):
+            self._round(i, {("a", "m1"): "ok"})
+        for i in range(6, 12):
+            self._round(i, {("b", "m1"): "timeout"})
+        self._run("uptime", "--by-station", "--json")
+        import json as _j
+        d = _j.loads(self.out.getvalue())
+        self.assertEqual([x["target"] for x in d["stations"]], ["b", "a"])
+
+    def test_station_human_output_has_headers(self):
+        for i in range(6):
+            self._round(i, {("a", "m1"): "ok"})
+        self._run("uptime", "--by-station")
+        self.assertIn("站级汇总", self.out.getvalue())
+
+
+class TestStatusUptime(unittest.TestCase):
+    """status 是用户的第一条命令: "整体怎么样"必须在那里就能看到。"""
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD", "_schedule_status")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        synapse._schedule_status = lambda: (True, "测试")
+        os.makedirs(synapse.REPORTS)
+        synapse.save_json(synapse.CONFIG, {"targets": {"a": {"base_url": "https://a.invalid",
+            "api_key": "k", "models": ["m1"], "enabled": True, "default": True}}})
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def _rounds(self, kinds, days_ago=0):
+        import datetime as dt
+        for i, k in enumerate(kinds):
+            when = dt.datetime.now() - dt.timedelta(days=days_ago, minutes=i)
+            rows = [{"target": "a", "model": "m1", "kind": k, "http": 200,
+                     "latency_ms": 10, "test": "basic", "snippet": ""}]
+            synapse.save_json(os.path.join(synapse.REPORTS,
+                                           "check-" + when.strftime("%Y%m%d-%H%M%S") + f"-{i}.json"),
+                              {"time": when.strftime("%Y-%m-%d %H:%M:%S"),
+                               "summary": {"total": 1}, "results": rows, "partial": False})
+
+    def test_status_shows_stability_tally(self):
+        self._rounds(["ok"] * 6)
+        self._run("status")
+        text = self.out.getvalue()
+        self.assertIn("长期稳定性", text)
+        self.assertIn("稳 1", text)
+
+    def test_status_json_carries_uptime(self):
+        self._rounds(["ok"] * 6)
+        self._run("status", "--json")
+        import json as _j
+        d = _j.loads(self.out.getvalue())
+        self.assertIn("uptime", d)
+        self.assertEqual(d["uptime"]["tally"]["稳"], 1)
+
+    def test_status_without_reports_is_quiet_but_works(self):
+        self.assertEqual(self._run("status"), 0)
+        self.assertIn("长期稳定性", self.out.getvalue())
+
+    def test_status_days_window_is_respected(self):
+        self._rounds(["ok"] * 6, days_ago=20)
+        self._run("status")
+        self.assertIn("还没有", self.out.getvalue() + "还没有")
+        self._run("status", "--days", "30")
+        self.assertIn("稳 1", self.out.getvalue())
 
 
 class TestUptime(unittest.TestCase):
@@ -968,12 +1310,14 @@ class TestDocsConsistency(unittest.TestCase):
         新增子命令忘了补就会红。
         """
         import re
-        src = open(synapse_mod.__file__, encoding="utf-8").read()
+        with open(synapse_mod.__file__, encoding="utf-8") as f:
+            src = f.read()
         subs = set(re.findall(r'sub\.add_parser\(\s*"([a-z][a-z-]*)"', src))
         self.assertTrue(subs, "没能从源码里抽到子命令列表(抽取逻辑失效了)")
-        comp = open(os.path.join(os.path.dirname(synapse_mod.__file__),
-                                 "packaging-src", "bash-completion", "synapse"),
-                    encoding="utf-8").read()
+        with open(os.path.join(os.path.dirname(synapse_mod.__file__),
+                               "packaging-src", "bash-completion", "synapse"),
+                  encoding="utf-8") as f:
+            comp = f.read()
         line = [l for l in comp.splitlines() if l.strip().startswith("subs=")][0]
         listed = set(line.split('"')[1].split())
         self.assertEqual(subs - listed, set(), "补全文件漏了这些子命令")
@@ -1264,10 +1608,12 @@ class TestCli(unittest.TestCase):
         synapse.save_json(synapse.PI_MODELS, {"providers": {"p": {"apiKey": "sk-1",
                        "baseUrl": "https://a.invalid",
                        "models": [{"id": "m1", "reasoning": True}]}}})
-        before = open(synapse.PI_MODELS, encoding="utf-8").read()
+        with open(synapse.PI_MODELS, encoding="utf-8") as f:
+            before = f.read()
         self.assertEqual(self._run("fix", "--target", "p", "--model", "m1"), 0)
         self.assertIn("[预览]", self.out.getvalue())
-        self.assertEqual(open(synapse.PI_MODELS, encoding="utf-8").read(), before)
+        with open(synapse.PI_MODELS, encoding="utf-8") as f:
+            self.assertEqual(f.read(), before)
 
     def test_fix_apply_writes_and_backs_up(self):
         self._config({})

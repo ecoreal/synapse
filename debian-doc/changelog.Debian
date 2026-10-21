@@ -1,3 +1,27 @@
+synapse (1.11.0) unstable; urgency=medium
+
+  * 坏数据不再"装死": config.json / issues.json / pi models.json 损坏时
+    明确报错并给出定位命令(python3 -m json.tool), 而不是静默当成空配置
+  * .outage.json / latest.json 损坏时按"没有历史"继续跑, 但 doctor 新增
+    「状态文件」检查项把损坏说出来, 让统计归零这件事可见
+  * uptime/status 跳过畸形报告(非 dict、非 list、坏 JSON)并计数, 输出里
+    明确告知"另有 N 份报告无法读取(已跳过)"
+  * _outage_track 对缺字段的行不再 KeyError, 也不会凭空制造连败
+  * 修正测试自身的三处未闭合文件(ResourceWarning 严格模式下的噪音)
+  * 测试 123 -> 138 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 19:30:00 +0800
+
+synapse (1.10.0) unstable; urgency=medium
+
+  * status 增加 [长期稳定性] 摘要: 第一条命令就能看到"这周整体稳不稳"
+    (各判定计数 + 最差的几条 + 被排除的内部错误数), 加 --days 控制窗口
+  * uptime 增加 --by-station: 按站汇总成功率(用户选的是站, 不是模型)
+    延迟刻意不聚合 —— 各模型的 p50 混在一起没有意义
+  * 测试 116 -> 123 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 18:55:00 +0800
+
 synapse (1.9.0) unstable; urgency=medium
 
   * 新增 uptime: 从 reports/ 的历史报告聚合各站成功率/最长连败/p50/主要失败原因

@@ -19,6 +19,16 @@ pi 模型中转站的连通性监控 / 诊断 / 配置修复工具。
 > 源码目录里若还有旧数据文件，首次运行会自动复制迁移过去，原文件保留。
 > 装 Debian 包后命令就是 `synapse`（不再需要 `python3 synapse.py`）。
 
+### 数据文件坏了会怎样
+
+监控工具不能因为数据坏就瘫掉，也不能装作没发生。三类文件区别对待：
+
+| 文件 | 损坏时 |
+|---|---|
+| 用户配置（`config.json` / `issues.json` / pi `models.json`） | **报错退出（码 1）**，并打印 `python3 -m json.tool <路径>` 让你定位。静默当空配置会假装“一切正常”，比报错危险得多 |
+| 历史状态（`.outage.json` / `latest.json`） | 按“没有历史”继续跑，但 `doctor` 的「状态文件」一项会点名 -> 统计从零开始这件事必须可见 |
+| 历史报告（`reports/*.json`） | `uptime` / `status` 跳过并计数，摘要写“另有 N 份报告无法读取（已跳过）”，一条坏文件不会毁掉其余统计 |
+
 ## 加中转站：只改 `STATIONS.md`
 
 在 `STATIONS.md` 的表格里加一行（要么直接填 url+key，要么 `pi:provider` 复用 pi 已配的），然后：
@@ -93,6 +103,8 @@ python3 synapse.py uptime --days 7
 ```
 
 单轮检查只能告诉你"此刻通不通"，`uptime` 把历史报告聚合成成功率。
+`status` 里也有一份 `[长期稳定性]` 摘要（判定计数 + 最差的几条），所以第一条命令
+就能看到"这周整体稳不稳"；`--by-station` 按站汇总，因为用户选的是站不是模型。
 两条底线：**样本少于 5 次拒绝下结论**（2 次成功不是 100% 稳）；
 `internal_error`（Synapse 自己的 bug）、`config_error`（配置没写全）和
 `partial` 定点体检**都不计入可用率** —— 它们会让一个健康的站看起来很差。
@@ -115,6 +127,7 @@ python3 synapse.py check --json | jq '.summary'
 python3 synapse.py uptime                    # 默认看最近 7 天
 python3 synapse.py uptime --days 30
 python3 synapse.py uptime --target hyb --json | jq '.targets[0]'
+python3 synapse.py uptime --by-station     # 站级汇总(用户选的是站, 不是模型)
 
 # 报告回收: reports/ 每轮一个文件会无限长，默认只预览，--apply 才真删
 python3 synapse.py prune                       # 默认保留每类最新 200 个、且只删 7 天前的
@@ -258,7 +271,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 116 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 138 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb
