@@ -131,6 +131,11 @@ python3 synapse.py uptime --days 30
 python3 synapse.py uptime --target hyb --json | jq '.targets[0]'
 python3 synapse.py uptime --by-station     # 站级汇总(用户选的是站, 不是模型)
 
+# 这里红了, 那我该干嘛: 谁的锅 / 要不要换站 / 敲哪条命令
+python3 synapse.py explain                    # 按 kind 聚合, 站方/你/我们 分开写
+python3 synapse.py explain --days 30 --limit 5
+python3 synapse.py explain --json | jq '.groups[] | {kind, owner, count}'
+
 # 一张图看完这周: 单文件离线 HTML 仪表盘(内联 SVG, 不引用任何外部资源)
 python3 synapse.py report                      # -> reports/dashboard.html
 python3 synapse.py report --days 30 -o /tmp/w.html
@@ -278,7 +283,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 145 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 152 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

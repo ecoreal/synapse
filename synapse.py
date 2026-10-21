@@ -31,7 +31,7 @@ import urllib.request
 from synapse_classify import (WAF_MARKERS, NO_CHANNEL_MARKERS, VERDICT,  # noqa: F401
                              BROKEN_TOOL_MARKERS, TOOLCALL_TEXT_RE,  # noqa: F401
                              _judge_tool_resp, _looks_html, _looks_like_toolcall_text,  # noqa: F401
-                             classify)
+                             classify, PLAYBOOK)
 from synapse_probe import (PROBE_TEXT, CTX, CACHE_PAD, CACHE_Q1, CACHE_Q2,  # noqa: F401
                           TEST_LABELS, NET_ERRORS, _net_or_internal,  # noqa: F401
                           probe, probe_multi, probe_cache, build_plan, run_plan)
@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.12.0"
+__version__ = "1.13.0"
 
 
 def _init_home():
@@ -1376,6 +1376,141 @@ def _history_rounds(days=7.0):
     return rounds
 
 
+def _explain_counts(days=7.0):
+    """按 kind 聚合窗口内的失败: {kind: {"total": n, "targets": {(t, m): n}}}。
+
+    只数失败(成功轮不进"该怎么处理", 否则满屏绿条人就不看了),
+    但内部错误单独留着 —— 它是唯一一类"该找我们而不是找站方"的。
+    """
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days) if days > 0 else None
+    entries = [e for e in _report_entries("check") if cutoff is None or e[0] >= cutoff]
+    acc = {}
+    used = 0
+    bad = 0
+    for _ts, path in reversed(entries):
+        try:
+            d = load_json(path, {}) or {}
+        except (ValueError, OSError):
+            bad += 1
+            continue
+        if not isinstance(d, dict) or d.get("partial"):
+            continue
+        rows_in = d.get("results")
+        if not isinstance(rows_in, list):
+            continue
+        used += 1
+        for r in rows_in:
+            if not isinstance(r, dict):
+                continue
+            if r.get("test") not in (None, "basic"):
+                continue
+            kind = r.get("kind") or "?"
+            if kind in _OK_KINDS:
+                continue
+            t, m = r.get("target") or "?", r.get("model") or "?"
+            a = acc.setdefault(kind, {"total": 0, "targets": {}})
+            a["total"] += 1
+            a["targets"][(t, m)] = a["targets"].get((t, m), 0) + 1
+    return acc, used, bad
+
+
+def _explain_groups(days=7.0, limit=3):
+    """把 kind 聚合成"人话 + 该敲的命令"。排序按影响面, 不按字母。"""
+    acc, used, bad = _explain_counts(days)
+    groups = []
+    for kind, a in acc.items():
+        info = PLAYBOOK.get(kind) or {
+            "owner": "?",
+            "meaning": "未知判定(可能是新版本/hand-edited 的报告)",
+            "advice": "别猜: 跑 doctor, 把这条报给 Synapse",
+            "commands": ["{c} doctor"],
+        }
+        pairs = sorted(a["targets"].items(), key=lambda kv: (-kv[1], kv[0]))
+        shown = pairs[:limit]
+        t0, m0 = shown[0][0]
+        cmds = [c.format(c=CMD, t=t0, m=m0) for c in info["commands"]]
+        groups.append({
+            "kind": kind,
+            "owner": info["owner"],
+            "meaning": info["meaning"],
+            "advice": info["advice"],
+            "count": a["total"],
+            "targets": [{"target": t, "model": m, "count": n} for (t, m), n in pairs],
+            "shown_targets": len(shown),
+            "commands": cmds,
+        })
+    # 排序: 先看谁的锅(用户能动手的排前面), 再看影响面
+    order = {"你": 0, "我们": 1, "站方": 2, "站方/参数": 2, "站方/网络": 2,
+             "站方/模型": 2, "网络/站方": 2, "站方/网络": 2, "-": 9, "?": 1}
+    groups.sort(key=lambda g: (order.get(g["owner"], 3), -g["count"], g["kind"]))
+    return groups, used, bad
+
+
+def cmd_explain(args, ctx):
+    """把"这里红了"翻译成"这是谁的锅 / 要不要换站 / 敲哪条命令"。
+
+    报告和 status 只给现象(0%、连败 17、no_channel)。现象不指向动作,
+    人就只能凭猜。这里唯一的目标: 让人在 30 秒内决定下一件事做什么。
+    """
+    days = float(getattr(args, "days", 7.0) or 0)
+    limit = int(getattr(args, "limit", 3) or 3)
+    groups, used, bad = _explain_groups(days, limit)
+    window = "全部历史" if days <= 0 else f"最近 {days:g} 天"
+    internal = sum(g["count"] for g in groups if g["kind"] == "internal_error")
+    try:
+        issues_open = len([i for i in (load_issues().get("issues") or [])
+                           if isinstance(i, dict)
+                           and i.get("status", "open") in ("open", "doing")])
+    except SynapseExit:
+        issues_open = 0
+
+    payload = {
+        "version": __version__,
+        "days": days,
+        "window": window,
+        "reports_used": used,
+        "unreadable_reports": bad,
+        "internal_errors": internal,
+        "open_issues": issues_open,
+        "groups": groups,
+    }
+
+    if ctx.as_json:
+        ctx.json(payload)
+        return 0
+
+    ctx.say(f"=== 该怎么处理 ({window} / {used} 份全量报告) ===")
+    if bad:
+        ctx.say(f"[!] 另有 {bad} 份报告无法读取(已跳过), 结论可能偏乐观")
+    if not groups:
+        ctx.say("没有需要处理的问题: 窗口内没有失败轮。")
+        if issues_open:
+            ctx.say(f"(台账里还有 {issues_open} 条未解决, 想看: {CMD} issue list)")
+        return 0
+
+    ctx.say(f"{len(groups)} 类问题, 按'你还能动手'的顺序排:")
+    for g in groups:
+        ctx.say("")
+        ctx.say(f"[{g['kind']}] ×{g['count']}    锅: {g['owner']}")
+        ctx.say(f"  含义: {g['meaning']}")
+        ctx.say(f"  处理: {g['advice']}")
+        shown = g["targets"][:limit]
+        face = ", ".join(f"{x['target']}/{x['model']} ×{x['count']}" for x in shown)
+        more = len(g["targets"]) - len(shown)
+        if more > 0:
+            face += f" … 还有 {more} 个"
+        ctx.say(f"  影响: {face}")
+        for c in g["commands"]:
+            ctx.say(f"  → {c}")
+    if internal:
+        ctx.say("")
+        ctx.say(f"[注意] 其中 {internal} 次是 Synapse 自己的 bug(internal_error), "
+                f"不是站方问题, 换站解决不了。")
+    if issues_open:
+        ctx.say(f"(台账里还有 {issues_open} 条未解决: {CMD} issue list)")
+    return 0
+
+
 def cmd_report(args, ctx):
     """生成单文件离线体检仪表盘。写了什么、写到哪, 都要能说清楚。"""
     days = args.days
@@ -1411,6 +1546,8 @@ def cmd_report(args, ctx):
         "worst_streak": max([r["longest_streak"] for r in stations], default=0),
         "internal_errors": sum(r["internal_errors"] for r in rows),
         "stations": stations, "targets": rows, "rounds": rounds,
+        # 图里要能直接写出"下一步敲什么", 否则它只是个更花哨的 status
+        "actions": _explain_groups(days)[0],
         "issues": [{"id": i.get("id"), "status": i.get("status"),
                     "target": i.get("target") or "", "model": i.get("model") or "",
                     "symptom": i.get("symptom") or "", "kind": i.get("kind") or ""}
@@ -2024,6 +2161,12 @@ def build_parser():
                    help="按站汇总(用户选的是站, 不是模型)")
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(fn=cmd_uptime)
+
+    p = sub.add_parser("explain", help="这里红了, 那我该干嘛(谁的锅/换站/命令)")
+    p.add_argument("--days", type=float, default=7.0, help="统计窗口(默认 7, 0 = 全部)")
+    p.add_argument("--limit", type=int, default=3, help="每类最多列几个目标")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.set_defaults(fn=cmd_explain)
 
     p = sub.add_parser("report", help="生成单文件离线体检仪表盘(HTML, 内联 SVG, 无外部资源)")
     p.add_argument("--days", type=float, default=7.0, help="统计窗口天数(默认 7, 0=全部)")

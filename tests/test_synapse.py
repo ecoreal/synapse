@@ -1829,6 +1829,22 @@ class TestReportHtml(unittest.TestCase):
         self.assertIn("还没有", html)
         self.assertIn("check", html)
 
+    def test_dashboard_carries_the_action_panel(self):
+        """一张只能看得出"红"的图还不够 —— 图里必须写出下一步敲什么。
+
+        否则用户还是要回来敲 explain, 那张图就只是个更花哨的 status。
+        """
+        self._round("20261020-100000", [self._bad("alpha", "m1", "auth_failed")])
+        out = os.path.join(self.tmp, "d.html")
+        rc = synapse.main(["report", "--days", "0", "--out", out],
+                          out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        with open(out, encoding="utf-8") as f:
+            html = f.read()
+        self.assertIn("该做什么", html)
+        self.assertIn("auth_failed", html)
+        self.assertIn("synapse check --target alpha", html)
+
     def test_default_output_path_is_reports_dashboard(self):
         synapse.main(["report", "--days", "0"], out=self.out, err=self.err)
         self.assertTrue(os.path.exists(os.path.join(synapse.REPORTS, "dashboard.html")))
@@ -1842,6 +1858,97 @@ class TestReportHtml(unittest.TestCase):
             html = f.read()
         self.assertNotIn("a<b>", html)
         self.assertIn("a&lt;b&gt;", html)
+
+
+class TestExplain(unittest.TestCase):
+    """报告只会说"0% / 连败 17 / no_channel", 但不回答"那我现在该干嘛"。
+
+    半夜被叫醒的人需要的是三件事: 这是谁的锅、要不要换站、敲哪条命令。
+    explain 就是这三件事, 其余都是废话。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k)
+                       for k in ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".lock")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _round(self, ts, rows):
+        payload = {"time": f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]}",
+                   "summary": {}, "results": rows, "partial": False}
+        with open(os.path.join(synapse.REPORTS, f"check-{ts}.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def _row(self, t, m, kind):
+        return {"target": t, "model": m, "kind": kind, "http": 0,
+                "latency_ms": 0, "snippet": "", "test": "basic"}
+
+    def test_every_verdict_kind_has_a_playbook(self):
+        """没人校验的东西一定会漂: 新增一个判定却忘了写"怎么处理"就红。"""
+        from synapse_classify import PLAYBOOK, VERDICT
+        missing = set(VERDICT) - set(PLAYBOOK)
+        self.assertEqual(missing, set(), f"这些判定没有处理建议: {sorted(missing)}")
+
+    def test_groups_by_kind_and_names_the_owner(self):
+        """同一个 kind 分散在不同站, 要合成一条: 用户要判断的是"谁的锅", 不是逐站数。"""
+        self._round("20261020-100000", [self._row("alpha", "m1", "no_channel"),
+                                        self._row("beta", "m2", "no_channel"),
+                                        self._row("alpha", "m1", "auth_failed")])
+        rc = synapse.main(["explain", "--days", "0"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        text = self.out.getvalue()
+        self.assertIn("no_channel", text)
+        self.assertIn("站方", text)          # 谁的锅
+        self.assertIn("换", text)            # 要不要换站
+        self.assertIn("alpha/m1", text)      # 影响面
+
+    def test_internal_error_is_never_blamed_on_the_station(self):
+        """我们自己的 bug 必须明确写成"我们的问题", 绝不能让用户去换站。"""
+        self._round("20261020-100000", [self._row("alpha", "m1", "internal_error")])
+        synapse.main(["explain", "--days", "0"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("我们", text)
+        self.assertIn("不是站", text)
+
+    def test_json_payload_is_pure_json(self):
+        self._round("20261020-100000", [self._row("alpha", "m1", "timeout")])
+        rc = synapse.main(["explain", "--days", "0", "--json"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        d = json.loads(self.out.getvalue())
+        self.assertEqual(d["groups"][0]["kind"], "timeout")
+        self.assertIn("owner", d["groups"][0])
+        self.assertTrue(d["groups"][0]["commands"])
+
+    def test_nothing_to_do_is_stated_not_silent(self):
+        self._round("20261020-100000", [{"target": "alpha", "model": "m1", "kind": "ok",
+                                        "http": 200, "latency_ms": 900,
+                                        "snippet": "", "test": "basic"}])
+        rc = synapse.main(["explain", "--days", "0"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        self.assertIn("没有需要处理", self.out.getvalue())
+
+    def test_ok_rows_are_not_listed_as_problems(self):
+        """成功轮不该出现在"该怎么处理"里 —— 否则满屏绿条, 人就不看了。"""
+        self._round("20261020-100000", [{"target": "alpha", "model": "m1", "kind": "ok",
+                                        "http": 200, "latency_ms": 900,
+                                        "snippet": "", "test": "basic"}])
+        synapse.main(["explain", "--days", "0", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        self.assertEqual(d["groups"], [])
 
 
 if __name__ == "__main__":

@@ -278,7 +278,49 @@ ul.issues li:last-child{border-bottom:0}
 font-family:ui-monospace,monospace}
 ul.issues .badge{margin-right:8px}
 footer{color:var(--muted);font-size:12px;text-align:center;padding:0 0 28px}
+.act{border-left:3px solid #3b4252;padding:8px 12px;margin:8px 0;background:#232833;border-radius:4px}
+.act.o-you{border-left-color:#d08770}
+.act.o-us{border-left-color:#bf616a}
+.act.o-station{border-left-color:#5e81ac}
+.acth{display:flex;align-items:baseline;gap:8px;margin-bottom:2px}
+.acth .n{color:#d8dee9;font-variant-numeric:tabular-nums}
+.owner{margin-left:auto;font-size:12px;color:#8fbcbb;border:1px solid #3b4252;border-radius:10px;padding:0 8px}
+.advice{margin:4px 0}
+.cmds code{display:block;margin:3px 0;padding:3px 6px;background:#1b1f27;border-radius:3px;color:#a3be8c;font-size:12px}
 """
+
+
+def _owner_class(owner):
+    if owner == "你":
+        return "you"
+    if owner == "我们":
+        return "us"
+    return "station"
+
+
+def _actions(p):
+    """把"这里红了"变成"下一步敲什么"。
+
+    这是整张图里唯一真正能减少决策时间的一栏, 所以放在最前面,
+    并且把命令原样写出来 —— 让人去别处查命令等于没写。
+    """
+    groups = p.get("actions") or []
+    if not groups:
+        return ('<p class="muted">窗口内没有失败轮, 不需要处理任何事。'
+                '</p>')
+    out = []
+    for g in groups[:6]:
+        cmds = "".join(f'<code>{_esc(c)}</code>' for c in (g.get("commands") or [])[:2])
+        owner = _esc(g.get("owner") or "?")
+        out.append(
+            f'<div class="act o-{_owner_class(g.get("owner") or "")}">'
+            f'<div class="acth"><b>{_esc(g.get("kind"))}</b>'
+            f'<span class="n">×{int(g.get("count") or 0)}</span>'
+            f'<span class="owner">锅: {owner}</span></div>'
+            f'<div class="muted">{_esc(g.get("meaning") or "")}</div>'
+            f'<div class="advice">{_esc(g.get("advice") or "")}</div>'
+            f'<div class="cmds">{cmds}</div></div>')
+    return "".join(out)
 
 
 def render_dashboard(p):
@@ -293,6 +335,7 @@ def render_dashboard(p):
         "<main>",
         _tiles(p),
         f'<section class="panel"><h2>站级记分卡</h2>{_stations(p)}</section>',
+        f'<section class="panel"><h2>该做什么</h2>{_actions(p)}</section>',
         f'<section class="panel"><h2>可用性时间线</h2>{_heatmap(p)}</section>',
         f'<section class="panel"><h2>失败原因分布</h2>{_reasons(p)}</section>',
         f'<section class="panel"><h2>延迟趋势</h2>{_latency(p)}</section>',

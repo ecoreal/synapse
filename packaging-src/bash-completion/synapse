@@ -5,7 +5,7 @@ _synapse_completions() {
     local cur prev sub subs opts
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    subs="check watch diagnose doctor uptime report prune fix import-from-pi cron timer issue sync-stations status"
+    subs="check watch diagnose doctor uptime explain report prune fix import-from-pi cron timer issue sync-stations status"
     if [[ $COMP_CWORD -eq 1 ]]; then
         mapfile -t COMPREPLY < <(compgen -W "$subs" -- "$cur")
         return
@@ -43,6 +43,9 @@ _synapse_completions() {
             ;;
         uptime)
             opts="--days --target --model --by-station --json"
+            ;;
+        explain)
+            opts="--days --limit --json"
             ;;
         report)
             opts="--days -o --out --json"

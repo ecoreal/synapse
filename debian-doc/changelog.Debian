@@ -1,3 +1,18 @@
+synapse (1.13.0) unstable; urgency=medium
+
+  * 新增 explain: 把"这里红了"翻译成"这是谁的锅 / 要不要换站 / 敲哪条命令"
+    - 按 kind 聚合窗口内失败轮, 每类给含义、处理建议、影响面、可复制命令
+    - owner 只有三种且必须写在明面上: 站方 / 你 / 我们
+      internal_error 永远写成"我们的 bug", 绝不引导用户去换站
+    - 排序按"用户还能动手"优先, 再按影响面; 成功轮不入列
+    - 没有失败轮时明说"没有需要处理的问题", 而不是打印空表
+  * 判定层新增 PLAYBOOK: kind -> (owner, 含义, 建议, 命令)
+    测试钉住"每个 VERDICT 都必须有处理建议", 新增判定忘了写就红
+  * report 仪表盘顶部新增"该做什么"一栏, 与 explain 共用同一份聚合
+  * 测试 145 -> 152 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 21:30:00 +0800
+
 synapse (1.12.0) unstable; urgency=medium
 
   * 新增 report: 生成单文件离线体检仪表盘(HTML, 内联 SVG)

@@ -122,3 +122,110 @@ VERDICT = {
     # 这一条永远不该出现在正常报告里; 出现就说明是 Synapse 自己的 bug, 别去折腾中转站。
     "internal_error": "🐞 Synapse 内部错误(不是站的问题!) → 这是本程序的 bug, 请带着这一行提 issue",
 }
+
+# --- 处理建议（playbook） ---------------------------------------------------
+# VERDICT 回答"这条响应是什么意思", PLAYBOOK 回答"那我现在该做什么"。
+# 后者才是半夜被叫醒的人要的: 谁的锅、要不要换站、敲哪条命令。
+# owner 只有三种, 必须写在明面上 —— 让用户去修他修不了的东西是最坏的体验:
+#   站方 / 你 / 我们
+# 每条 commands 里可用 {c} {t} {m} 占位符, 由调用方填成真实命令。
+PLAYBOOK = {
+    "ok": {"owner": "-", "meaning": "正常", "advice": "无需动作", "commands": []},
+    "ok_truncated": {
+        "owner": "站方/参数",
+        "meaning": "响应被截断(max_tokens 用尽或渠道截流), 功能可用但长输出会断",
+        "advice": "功能可用; 要长输出就调大 max_tokens 或换个更宽松的站",
+        "commands": ["{c} diagnose --target {t} --model {m}"]},
+    "ok_nonjson": {
+        "owner": "站方",
+        "meaning": "返回了非 JSON(纯文本回应, 或代理改写了响应)",
+        "advice": "聊天能用; 接 agent 需要结构化输出, 建议换站",
+        "commands": ["{c} diagnose --target {t} --model {m}"]},
+    "ok_tool_use": {"owner": "-", "meaning": "工具调用正常", "advice": "无需动作",
+                    "commands": []},
+    "cache_passthrough": {"owner": "-", "meaning": "前缀缓存透传正常(省钱)",
+                          "advice": "无需动作", "commands": []},
+    "cache_miss": {
+        "owner": "站方",
+        "meaning": "前缀缓存没透传(cache_read=0), 每轮全价重算",
+        "advice": "功能不受影响, 但在烧钱; 长期这样值得换个站",
+        "commands": ["{c} diagnose --target {t} --model {m}"]},
+    "rate_limited": {
+        "owner": "站方",
+        "meaning": "限流(429)", "advice": "等一会再试; 频繁就降并发 --jobs 或换站",
+        "commands": ["{c} check --target {t} --jobs 2"]},
+    "server_error": {
+        "owner": "站方",
+        "meaning": "上游 5xx: 渠道自己不稳, 与你的配置无关",
+        "advice": "重试一次; 持续就换站或找站方, 改配置没用",
+        "commands": ["{c} check --target {t}", "{c} diagnose --target {t} --model {m}"]},
+    "upstream_400": {
+        "owner": "站方/参数",
+        "meaning": "上游 400: 通常是渠道不认某个参数(温度/tools/图片)",
+        "advice": "跑 diagnose 看报错字段; 去掉该参数或换站",
+        "commands": ["{c} diagnose --target {t} --model {m}"]},
+    "bad_request": {
+        "owner": "你",
+        "meaning": "请求被拒(400), 渠道不认这个参数/字段",
+        "advice": "多半是参数或图片格式问题; 用 diagnose 定位后调整请求",
+        "commands": ["{c} diagnose --target {t} --model {m}"]},
+    "anti_probe": {
+        "owner": "站方",
+        "meaning": "探测文案命中了站方反测活关键词(不是在说渠道坏了)",
+        "advice": "换一段探测文本; 该站不适合高频测活, 可拉长间隔",
+        "commands": ["SYNAPSE_PROBE_TEXT='ping' {c} check --target {t}"]},
+    "waf_blocked": {
+        "owner": "站方",
+        "meaning": "被 Cloudflare/WAF 拦成网页(403 不是 key 错)",
+        "advice": "换探测文本再试; 频繁拦截就别放进长跑",
+        "commands": ["SYNAPSE_PROBE_TEXT='ping' {c} check --target {t}"]},
+    "auth_failed": {
+        "owner": "你",
+        "meaning": "key 无效/欠费/被封", "advice": "去站后台换 key → 更新 STATIONS.md → 同步",
+        "commands": ["{c} sync-stations --check", "{c} check --target {t}"]},
+    "auth_unavailable": {
+        "owner": "你",
+        "meaning": "这个目标没配 key, 或者 key 变量是空的",
+        "advice": "补 api_key/key_from_pi; 缺 key 的站点会一直红着",
+        "commands": ["{c} import-from-pi", "{c} check --target {t}"]},
+    "no_channel": {
+        "owner": "站方",
+        "meaning": "该模型在这个站没有可用渠道(下架/改名/分组不对)",
+        "advice": "换模型名或换站; 重试不会自愈",
+        "commands": ["{c} check --target {t} --model {m}", "{c} sync-stations --check"]},
+    "timeout": {
+        "owner": "站方/网络",
+        "meaning": "超时: 站方挂死, 或你这边网络不通",
+        "advice": "先重试一次; 持续就加 --timeout 或换站",
+        "commands": ["{c} check --target {t} --timeout 120"]},
+    "conn_error": {
+        "owner": "网络/站方",
+        "meaning": "连接失败(DNS/网络/TLS/拒绝连接)",
+        "advice": "先确认 base_url 与网络; 本机能上网而它不通 → 换站",
+        "commands": ["{c} diagnose --target {t} --base-url <URL>"]},
+    "tool_call_broken": {
+        "owner": "站方",
+        "meaning": "工具调用的 JSON 被渠道破坏了",
+        "advice": "这种站不能做 agent 任务, 只适合纯聊天",
+        "commands": ["{c} diagnose --target {t} --model {m} --tools"]},
+    "tool_call_text": {
+        "owner": "站方",
+        "meaning": "模型把工具调用当文本吐出来",
+        "advice": "agent 流程不可用(能做纯聊天); 换站",
+        "commands": ["{c} diagnose --target {t} --model {m} --tools"]},
+    "thinking_unsupported": {
+        "owner": "站方/模型",
+        "meaning": "渠道不支持 thinking 参数",
+        "advice": "把该模型的 reasoning 关掉, 命令在下面",
+        "commands": ["{c} fix --target {t} --model {m} --fix disable-reasoning --apply"]},
+    "config_error": {
+        "owner": "你",
+        "meaning": "目标配置不完整, 这一轮根本没真正检查它",
+        "advice": "补齐 base_url + api_key(或从 pi 导入)",
+        "commands": ["{c} import-from-pi", "{c} doctor"]},
+    "internal_error": {
+        "owner": "我们",
+        "meaning": "Synapse 自己出错了 —— 不是站的问题, 换站是白费力气",
+        "advice": "这是本程序的 bug; 带着这行和对应报告提 issue",
+        "commands": ["{c} doctor", "{c} issue add --kind internal_error"]},
+}

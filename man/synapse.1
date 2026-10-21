@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.12.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.13.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -12,9 +12,11 @@ synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
 .B fix \-\-apply
 时才会被修改, 且每次修改自动备份。
 .PP
+.ad l
 子命令:
 .TP
 .B check
+.ad l
 一次性连通性检查(支持 \-\-tools/\-\-cache/\-\-vision/\-\-json)。
 每轮结束会打印跨轮趋势: 某个 目标/模型 连续失败达到 2 轮时报"转坏",
 恢复时报"已恢复"(单轮明细看不出抖动和故障的区别)。
@@ -22,34 +24,43 @@ synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
 "合计 0 项 + 退出 0"会被误读成"刚检查过, 一切正常"。
 .TP
 .B watch
+.ad l
 周期监控(前台常驻)。
 .TP
 .B diagnose
+.ad l
 单模型深度诊断(基础/流式/工具/thinking/图像/缓存)。
 \-\-json 时 stdout 输出 {target, model, base_url, results, conclusions},
 结论是可机读的数组, 文字说明走 stderr。
 .TP
 .B fix
+.ad l
 修复 pi 配置(默认只预览 diff, 加 \-\-apply 才写入)。
 .TP
 .B import\-from\-pi
+.ad l
 从 ~/.pi/agent/models.json 导入目标。
 .TP
 .B cron
+.ad l
 用 crontab 做定期检查(\-\-install)。
 .TP
 .B timer
+.ad l
 systemd 用户定时器管理: on \-\-interval 1h / off / status / log / run。
 比 crontab 更符合 Debian 惯例, 且不依赖登录的 shell 环境。
 .TP
 .B issue
+.ad l
 问题台账: add/list/note/status/rm。
 list 支持 \-\-json 输出 {total, open, filter, issues}。
 .TP
 .B sync\-stations
+.ad l
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
 .TP
 .B doctor
+.ad l
 自检: 诊断 Synapse 自己(只读, 不联网)。检查数据目录是否落在代码目录里、
 config.json 的权限(内含明文 key, 非 0600 会警告)、key_from_pi 引用是否
 能解析、最近一次全量体检的新鲜度、本机时钟是否异常(报告时间在未来)、
@@ -59,6 +70,7 @@ Python 版本。
 \-\-json 时输出 {time, checks:[{level,name,detail,hint}], summary}。
 .TP
 .B uptime
+.ad l
 历史稳定性: 把 reports/ 里过去每一轮的体检结果聚合起来, 按 目标/模型 算
 成功率、最长连败、p50 延迟和主要失败原因。单轮检查回答不了"这个站值不值得
 放进 pi 长跑", 这个能。
@@ -70,7 +82,24 @@ Python 版本。
 internal_error(Synapse 自己的 bug, 不是站的问题)、config_error(配置没写全)。
 \-\-json 时输出 {days, window, reports_used, targets:[...], summary}。
 .TP
+.B explain
+.ad l
+报告只给现象(0%、连败 17、no\_channel), 不指向动作, 人只能凭猜。
+explain 把现象翻译成三件事: \fB这是谁的锅\fR(站方 / 你 / 我们)、
+\fB要不要换站\fR、\fB敲哪条命令\fR。
+按 kind 聚合窗口内所有失败轮, 每类给出含义、处理建议、影响面(前 3 个目标)、
+可直接复制的命令; 排序按"用户还能动手"优先, 再按影响面。
+三类 owner 必须写在明面上: 让用户去修他修不了的东西是最坏的体验 ——
+\fBinternal\_error 永远写成"我们的 bug"\fR, 绝不引导用户换站。
+成功轮不会出现在这里(否则满屏绿条, 人就不看了); 没有失败轮时明确说
+"没有需要处理的问题", 而不是打印一个空表。
+\-\-days N 窗口(默认 7, 0 = 全部); \-\-limit N 每类列几个目标(默认 3);
+\-\-json 输出 {days, reports\_used, internal\_errors, groups:[{kind, owner,
+meaning, advice, count, targets, commands}]}。
+同样的内容也会出现在 \fBreport\fR 生成的仪表盘顶部"该做什么"一栏。
+.TP
 .B report
+.ad l
 生成一张\fB单文件离线\fR体检仪表盘(HTML)。数据来自 reports/ 里的历史报告,
 图表全部用内联 SVG 画, \fB不引用任何外部脚本/样式/字体/图片\fR ——
 中转站面板常开在断网机器或内网跳板机上, 引用 CDN 等于白屏。
@@ -84,6 +113,7 @@ ok_rate, stations, targets, bytes, ...}。
 不参与 prune 的清理候选(文件名不匹配 check\-/diagnose\- 前缀)。
 .TP
 .B prune
+.ad l
 回收历史报告(默认只预览, 加 \-\-apply 才真删)。
 reports/ 每轮体检落一个文件, 不设上限会无限增长。
 \-\-keep N 每个前缀(如 check\-/diagnose\-)保留最新 N 个(默认 200);
@@ -92,6 +122,7 @@ reports/ 每轮体检落一个文件, 不设上限会无限增长。
 \-\-json 时输出 {dry_run, reports_dir, keep, days, kept, would_delete, freed_bytes}。
 .TP
 .B status
+.ad l
 一览: 目标清单 + 台账 + 长跑失败统计 + 最近一次全量体检的新鲜度。
 新鲜度这一项回答的是"监控器自己有没有在跑": reports/latest.json 只由全量
 体检写入, 它的年龄就是心跳。超过 \-\-stale\-hours(默认 3)没有新的全量体检
@@ -171,6 +202,7 @@ synapse cron \-\-install               # 无 systemd 环境用 crontab
 不是中转站的问题: 该行不会计入连续失败, 但整轮仍按异常返回 1。
 .SH 示例
 .PP
+.ad l
 .nf
 synapse \-\-version
 synapse status
