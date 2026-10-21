@@ -1993,6 +1993,99 @@ class TestTimeline(unittest.TestCase):
         self.assertEqual(rc, 0, self.err.getvalue())
         self.assertIn("还没有", self.out.getvalue())
 
+class TestStatusVerdict(unittest.TestCase):
+    """status 是半夜被叫醒时第一个敲的命令, 它第一屏必须是结论。
+
+    现在它先铺 9 行目标清单(静态配置), 真正的结论("你默认的站 2 天没通过,
+    该换成 tierflow")却在 best 里 —— 醒来的人不会想到再敲一次 best。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k)
+                       for k in ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _round(self, ts, rows):
+        payload = {"time": f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]}",
+                   "summary": {}, "results": rows, "partial": False}
+        with open(os.path.join(synapse.REPORTS, f"check-{ts}.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def _row(self, t, m, kind):
+        return {"target": t, "model": m, "kind": kind, "http": 200,
+                "latency_ms": 500, "snippet": "", "test": "basic"}
+
+    def _cfg(self, default):
+        cfg = {"targets": {"good": {"enabled": True, "models": ["m1"]},
+                           "bad": {"enabled": True, "models": ["m1"]}}}
+        if default:
+            cfg["targets"][default]["default"] = True
+        synapse.save_json(synapse.CONFIG, cfg)
+
+    def test_status_puts_the_conclusion_first(self):
+        self._cfg("bad")
+        for i in range(6):
+            self._round(f"2026102{i}-100000",
+                        [self._row("good", "m1", "ok"),
+                         self._row("bad", "m1", "timeout")])
+        synapse.main(["status"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        # 结论必须出现在目标清单之前 —— 醒了的人只看得进第一屏
+        self.assertLess(text.index("现在"), text.index("[目标清单]"),
+                        "status 的结论被静态配置挡住了")
+
+    def test_status_names_the_default_station_and_the_alternative(self):
+        self._cfg("bad")
+        for i in range(6):
+            self._round(f"2026102{i}-100000",
+                        [self._row("good", "m1", "ok"),
+                         self._row("bad", "m1", "timeout")])
+        synapse.main(["status"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("bad", text)
+        self.assertIn("good", text)
+        self.assertIn("synapse best", text)
+
+    def test_status_and_best_never_disagree(self):
+        """两处各算一遍推荐, 迟早给出不同答案 —— 那比不推荐更糟。"""
+        self._cfg("bad")
+        for i in range(6):
+            self._round(f"2026102{i}-100000",
+                        [self._row("good", "m1", "ok"),
+                         self._row("bad", "m1", "timeout"),
+                         self._row("good", "m2", "ok")])
+        synapse.main(["best", "--days", "0", "--json"], out=self.out, err=self.err)
+        pick = json.loads(self.out.getvalue())["pick"]
+        self.out.seek(0); self.out.truncate(0)
+        synapse.main(["status", "--days", "0", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        self.assertEqual(d["verdict"]["pick"]["target"], pick["target"])
+        self.assertEqual(d["verdict"]["pick"]["model"], pick["model"])
+
+    def test_status_does_not_invent_a_problem_when_all_is_well(self):
+        self._cfg("good")
+        for i in range(6):
+            self._round(f"2026102{i}-100000", [self._row("good", "m1", "ok")])
+        synapse.main(["status"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("没有正在失败", text)
+        self.assertNotIn("[!] 默认站", text)
+
 
 class TestBest(unittest.TestCase):
     """监控的终点是决策: "我该把哪个站/模型放进 pi"。

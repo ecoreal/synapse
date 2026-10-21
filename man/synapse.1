@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.18.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.19.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -82,6 +82,19 @@ Python 版本。
 internal_error(Synapse 自己的 bug, 不是站的问题)、config_error(配置没写全)。
 \-\-json 时输出 {days, window, reports_used, targets:[...], summary}。
 .TP
+.B status
+全局一览。\fB第一屏是结论\fR, 不是配置清单:
+.IP \(bu 2
+现在有几个目标在失败、最久的是哪个、已经多久没通过
+.IP \(bu 2
+\fB默认站\fR当前判定, 以及(有落差时)推荐的是哪个、怎么改
+.IP \(bu 2
+之后才是目标清单 / 心跳(上次体检多久前) / 长期稳定性 / 长跑失败统计 / 台账
+.PP
+结论与 \fBbest\fR、\fBtimeline\fR 共用同一份计算(\fI\_best\_compute\fR):
+两处各算一遍, 迟早给出不同的推荐, 那比不推荐更糟。
+\fB\-\-json\fR 增加 verdict:{pick, current\_default, worst, failing}。
+
 .B timeline
 "坏了多久了"。\fBtimeline\fR 对每个 目标/模型 给出: 当前连败几轮、
 \fB从哪一轮开始\fR、已经持续多久、上次通过是什么时候。

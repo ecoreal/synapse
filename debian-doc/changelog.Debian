@@ -1,3 +1,16 @@
+synapse (1.19.0) unstable; urgency=medium
+
+  * status: 第一屏改成结论(正在失败最久的是谁/默认站判定/该换成谁/敲什么)
+    - 原来先铺 9 行静态目标清单, 真正的结论在 best/timeline 里,
+      半夜被叫醒的人不会想到再敲一次
+    - 抽 _best_compute(): best 与 status 共用同一份推荐计算
+      —— 两处各算一遍迟早给不同答案, 那比不推荐更糟(有测试盯着)
+    - --json 增加 verdict:{pick, current_default, worst, failing}
+  * 抽 _since_hours(): timeline 与 status 共用同一份时长计算
+  * 测试 175 -> 179 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 23:00:00 +0800
+
 synapse (1.18.0) unstable; urgency=medium
 
   * 新增 timeline: 坏了多久了(连败起点/持续时长/上次通过时间)

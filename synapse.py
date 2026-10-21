@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.18.0"
+__version__ = "1.19.0"
 
 
 def _init_home():
@@ -819,15 +819,59 @@ def cmd_status(args, ctx):
     last = _last_check(getattr(args, "stale_hours", 3.0))
     up_days = getattr(args, "days", 7.0)
     up_rows, up_used, up_bad = _uptime_stats(up_days)
+    vb = _best_compute(up_days)
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=up_days)) if up_days > 0 else None
+    _stamps = [e[0] for e in _report_entries("check") if cutoff is None or e[0] >= cutoff]
+    last_ts = max(_stamps) if _stamps else None
+    failing = sorted([r for r in up_rows if r["samples"] and r["last_kind"] not in _OK_KINDS],
+                     key=lambda x: (-x["streak"], -_since_hours(x, last_ts)))
     if args.as_json:
         ctx.json({"time": now(), "targets": cfg["targets"], "outage": snap,
                   "dirty": dirty, "issues": db["issues"], "last_check": last,
+                  "verdict": {"pick": ({"target": vb["pick"]["target"],
+                                        "model": vb["pick"]["model"],
+                                        "ok_rate": vb["pick"]["ok_rate"],
+                                        "samples": vb["pick"]["samples"]}
+                                       if vb["pick"] else None),
+                              "current_default": vb["current_default"],
+                              "worst": ({"target": failing[0]["target"],
+                                         "model": failing[0]["model"],
+                                         "streak": failing[0]["streak"],
+                                         "since": failing[0]["since"],
+                                         "hours": round(_since_hours(failing[0], last_ts), 2)}
+                                        if failing else None),
+                              "failing": len(failing)},
                   "uptime": {"days": up_days, "reports_used": up_used,
                              "unreadable_reports": up_bad,
                              "tally": _uptime_tally(up_rows), "targets": up_rows}})
         return 0
 
     ctx.say(f"\n=== Synapse 状态  {now()} ===")
+
+    # 第一屏必须是结论: 醒了的人只看这一屏, 不会再去敲 best/timeline
+    cur = vb["current_default"]
+    if failing:
+        w = failing[0]
+        ctx.say(f"\n[现在] {len(failing)} 个目标/模型正在失败, "
+                f"最久的是 {w['target']}/{w['model']}: 连败 {w['streak']} 轮、"
+                f"{_ago_cn(_since_hours(w, last_ts))}没通过")
+        ctx.say(f"       第一件事: {CMD} timeline   (每个坏了多久、从哪一轮开始)")
+    else:
+        ctx.say("\n[现在] 没有正在失败的目标 —— 所有被测目标最近一轮都通过了")
+    if cur:
+        rate = f"{cur['ok_rate'] * 100:.1f}%" if cur["ok_rate"] is not None else "无数据"
+        line = (f"       默认站 {cur['target']}: {cur['verdict']}"
+                f"({rate}, {cur['samples']} 次, 连败 {cur['longest_streak']})")
+        if cur["mismatch"] and vb["pick"]:
+            p = vb["pick"]
+            line += (f" —— 但推荐的是 {p['target']}/{p['model']}"
+                     f"({p['ok_rate'] * 100:.1f}%)")
+            ctx.say(line)
+            ctx.say(f"       改: {CMD} sync-stations --default {p['target']}"
+                    f"   (先看 {CMD} best 的完整榜单)")
+        else:
+            ctx.say(line)
+
     ctx.say(f"\n[目标清单] {sum(1 for e in cfg['targets'].values() if e.get('enabled', True))} 个启用")
     for n, e in cfg["targets"].items():
         on = "✔" if e.get("enabled", True) else "✗禁用"
@@ -1375,6 +1419,17 @@ def _ago_cn(hours):
     return f"{hours / 24:.1f} 天"
 
 
+def _since_hours(row, last_ts):
+    """从连败起点到最后一轮报告的时长。时间戳解析失败就当 0, 不编造。"""
+    if not (last_ts and row.get("since")):
+        return 0.0
+    try:
+        since = datetime.datetime.strptime(row["since"], "%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return 0.0
+    return max(0.0, (last_ts - since).total_seconds() / 3600)
+
+
 def cmd_timeline(args, ctx):
     """每个目标/模型: 从哪一轮开始坏的, 坏了多久, 上次还行是什么时候。
 
@@ -1398,13 +1453,7 @@ def cmd_timeline(args, ctx):
         if r["last_kind"] in _OK_KINDS:
             recovered.append(item)
             continue
-        hours = 0.0
-        if last_ts and r["since"]:
-            try:
-                since = datetime.datetime.strptime(r["since"], "%Y-%m-%d %H:%M")
-                hours = max(0.0, (last_ts - since).total_seconds() / 3600)
-            except ValueError:
-                hours = 0.0
+        hours = _since_hours(r, last_ts)
         item["hours"] = round(hours, 2)
         item["duration"] = _ago_cn(hours)
         failing.append(item)
@@ -1473,11 +1522,9 @@ def cmd_timeline(args, ctx):
     return 0
 
 
-def cmd_best(args, ctx):
-    """把"该用哪个"变成可辩护的推荐, 而不是拍脑袋排名。"""
-    days = args.days
-    window = f"最近 {days:g} 天" if days > 0 else "全部历史"
-    need = getattr(args, "need", None)
+def _best_compute(days=7.0, need=None):
+    """算"该用哪个"。best 与 status 必须共用这一份 —— 两处各算一遍,
+    迟早给出不同的推荐, 那比不推荐更糟。"""
     rows, used, bad = _uptime_stats(days)
     caps = _best_caps(days) if need else {}
 
@@ -1508,9 +1555,6 @@ def cmd_best(args, ctx):
                                x["p50_latency_ms"] or 10 ** 9, -x["samples"]))
     ok_ranked = [r for r in ranked if r["verdict"] in ("稳", "勉强")]
     pick = ok_ranked[0] if ok_ranked else None
-    top = getattr(args, "top", 10)
-    shown = ranked[:top]
-
     # 与"你现在标为默认的那个"对账: 工具推荐了 A, 却不说默认是 0% 的 B,
     # 等于把最后一步("那我要改哪里")留给用户自己拼。
     stations = _uptime_by_station(rows)
@@ -1530,6 +1574,23 @@ def cmd_best(args, ctx):
                "samples": (st or {}).get("samples", 0),
                "longest_streak": (st or {}).get("longest_streak", 0),
                "mismatch": bool(pick and pick["target"] != name)}
+
+    return {"days": days, "window": ("最近 %g 天" % days) if days > 0 else "全部历史",
+            "need": need, "reports_used": used, "unreadable_reports": bad,
+            "ranked": ranked, "excluded": excluded, "thin": thin,
+            "pick": pick, "current_default": cur, "rows": rows}
+
+
+def cmd_best(args, ctx):
+    """把"该用哪个"变成可辩护的推荐, 而不是拍脑袋排名。"""
+    days = args.days
+    r0 = _best_compute(days, getattr(args, "need", None))
+    window, need = r0["window"], r0["need"]
+    used, bad = r0["reports_used"], r0["unreadable_reports"]
+    ranked, excluded, thin = r0["ranked"], r0["excluded"], r0["thin"]
+    pick, cur = r0["pick"], r0["current_default"]
+    top = getattr(args, "top", 10)
+    shown = ranked[:top]
 
     if ctx.as_json:
         ctx.json({"days": days, "window": window, "need": need,

@@ -21,6 +21,21 @@ pi 模型中转站的连通性监控 / 诊断 / 配置修复工具。
 > 源码目录里若还有旧数据文件，首次运行会自动复制迁移过去，原文件保留。
 > 装 Debian 包后命令就是 `synapse`（不再需要 `python3 synapse.py`）。
 
+### 第一屏就是结论: `synapse status`
+
+半夜被叫醒时第一个敲的命令，第一屏必须是结论，而不是 9 行静态配置：
+
+```
+=== Synapse 状态  2026-10-21 22:19:02 ===
+
+[现在] 8 个目标/模型正在失败, 最久的是 hyb/deepseek-v4.1-flash: 连败 17 轮、2.0 天没通过
+       第一件事: synapse timeline   (每个坏了多久、从哪一轮开始)
+       默认站 hyb: 不建议(45.1%, 51 次, 连败 17) —— 但推荐的是 tierflow/tierflow_pro(100.0%)
+       改: synapse sync-stations --default tierflow   (先看 synapse best 的完整榜单)
+```
+
+结论和 `best`/`timeline` **共用同一份计算**（`_best_compute`）：两处各算一遍，迟早给出不同推荐，那比不推荐更糟——有测试盯着这条。
+
 ### 坏了多久了: `synapse timeline`
 
 "连败 17 轮"和"连败 17 轮、已经 2 天没通过"是两种不同的决定。`timeline` 给出每个目标/模型的连败起点、已持续时长、上次通过时间：
@@ -330,7 +345,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 175 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 179 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb
