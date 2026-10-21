@@ -179,6 +179,15 @@ python3 synapse.py report                      # -> reports/dashboard.html
 python3 synapse.py report --days 30 -o /tmp/w.html
 python3 synapse.py report --json | jq '{rounds, ok_rate, stations}'
 
+# 该用哪个: 拿已有证据回答"放进 pi 用哪个", 证据不足就直说, 不编综合分
+python3 synapse.py best                       # 成功率 → 连败 → p50 延迟
+python3 synapse.py best --need tools          # 只留"工具调用最近一次真通过"的
+python3 synapse.py best --json | jq '.pick, .current_default'
+
+# 坏了多久了: 连败起点 / 已持续时长 / 上次通过是什么时候
+python3 synapse.py timeline                   # 正在失败的按"坏得最久"排序
+python3 synapse.py timeline --target hyb --json
+
 # 报告回收: reports/ 每轮一个文件会无限长，默认只预览，--apply 才真删
 python3 synapse.py prune                       # 默认保留每类最新 200 个、且只删 7 天前的
 python3 synapse.py prune --keep 50 --days 3    # 更激进（仍只预览）
