@@ -1910,6 +1910,104 @@ class TestReportHtml(unittest.TestCase):
         self.assertIn("a&lt;b&gt;", html)
 
 
+class TestBest(unittest.TestCase):
+    """监控的终点是决策: "我该把哪个站/模型放进 pi"。
+
+    这不是拍脑袋的排行 —— 样本不足时必须拒绝给结论, 判定必须能追到证据,
+    否则就是在制造"看起来很像结论的猜测"。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k)
+                       for k in ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".lock")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _round(self, ts, rows):
+        payload = {"time": f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]}",
+                   "summary": {}, "results": rows, "partial": False}
+        with open(os.path.join(synapse.REPORTS, f"check-{ts}.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def _row(self, t, m, kind, test="basic", lat=900):
+        return {"target": t, "model": m, "kind": kind, "http": 200,
+                "latency_ms": lat, "snippet": "", "test": test}
+
+    def test_ranks_the_healthier_target_first(self):
+        for i in range(6):
+            self._round(f"2026102{i}-100000",
+                        [self._row("good", "m1", "ok"),
+                         self._row("bad", "m1", "timeout")])
+        rc = synapse.main(["best", "--days", "0"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        text = self.out.getvalue()
+        self.assertLess(text.index("good/m1"), text.index("bad/m1"),
+                        "成功率高的排前面")
+
+    def test_refuses_to_rank_when_samples_are_thin(self):
+        """2 次成功不是 100% 稳。样本不足必须明确拒绝, 而不是给个漂亮的第一名。"""
+        self._round("20261020-100000", [self._row("thin", "m1", "ok"),
+                                        self._row("thin", "m1", "ok")])
+        synapse.main(["best", "--days", "0"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("样本不足", text)
+        self.assertNotIn("推荐: thin/m1", text)
+
+    def test_internal_errors_do_not_lower_a_station_score(self):
+        """我们自己的 bug 不该让一个健康的站排名下滑 —— 那是甩锅给站方。"""
+        rows = [self._row("stable", "m1", "ok") for _ in range(6)]
+        rows += [self._row("stable", "m1", "internal_error")]
+        self._round("20261020-100000", rows)
+        synapse.main(["best", "--days", "0", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        row = [r for r in d["ranked"] if r["target"] == "stable"][0]
+        self.assertEqual(row["ok_rate"], 1.0)
+
+    def test_need_tools_excludes_broken_tool_channels(self):
+        """要做 agent 就必须真的能调工具: 会吐坏 JSON 的站必须被排除。"""
+        for i in range(5):
+            self._round(f"2026102{i}-100000",
+                        [self._row("chatty", "m1", "ok"),
+                         self._row("chatty", "m1", "ok", test="tools"),
+                         self._row("brokentools", "m1", "ok"),
+                         self._row("brokentools", "m1", "tool_call_broken", test="tools")])
+        synapse.main(["best", "--days", "0", "--need", "tools"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertNotIn("推荐: brokentools", text)
+        self.assertIn("推荐: chatty/m1", text)
+        # 被排除的仍要列出来 + 说清原因(消失会让人以为没测过)
+        self.assertIn("brokentools/m1: tools 最近一次是 tool_call_broken", text)
+
+    def test_json_exposes_the_evidence_not_just_a_winner(self):
+        for i in range(6):
+            self._round(f"2026102{i}-100000", [self._row("good", "m1", "ok")])
+        synapse.main(["best", "--days", "0", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        self.assertIn("ranked", d)
+        row = d["ranked"][0]
+        for k in ("target", "model", "ok_rate", "samples", "verdict", "longest_streak"):
+            self.assertIn(k, row)
+
+    def test_empty_history_says_so_instead_of_printing_a_winner(self):
+        rc = synapse.main(["best", "--days", "0"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        self.assertIn("还没有", self.out.getvalue())
+
+
 class TestSecretRedaction(unittest.TestCase):
     """报告会被贴到 issue / 群里求助 —— 里面绝不能有你的 key。
 

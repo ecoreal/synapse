@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.15.0"
+__version__ = "1.16.0"
 
 
 def _init_home():
@@ -1317,6 +1317,141 @@ def _uptime_tally(rows):
     return tally
 
 
+_CAP_TESTS = {"tools": "tools", "cache": "cache", "vision": "vision_user",
+              "thinking": "thinking", "stream": "stream"}
+
+
+def _best_caps(days=7.0):
+    """每个 目标/模型 在**各项能力测试**上的最近一次结论。
+
+    与 _uptime_stats 分工不同: 那里只数 basic(可用率), 这里看能力。
+    做 agent 要 tools, 长对话要 cache, 看图要 vision —— 可用率高但工具吐坏
+    JSON 的站, 放进 pi 跑 agent 只会让你怀疑自己的代码。
+    """
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days) if days > 0 else None
+    entries = [e for e in _report_entries("check") if cutoff is None or e[0] >= cutoff]
+    caps = {}
+    for _ts, path in reversed(entries):          # 时间正序 → 后写覆盖, 留最新结论
+        try:
+            d = load_json(path, {}) or {}
+        except (ValueError, OSError):
+            continue
+        if not isinstance(d, dict) or d.get("partial"):
+            continue
+        rows_in = d.get("results")
+        if not isinstance(rows_in, list):
+            continue
+        for r in rows_in:
+            if not isinstance(r, dict):
+                continue
+            test = r.get("test")
+            if test in (None, "basic"):
+                continue
+            key = (r.get("target") or "?", r.get("model") or "?")
+            caps.setdefault(key, {})[test] = r.get("kind") or "?"
+    return caps
+
+
+def _cap_ok(kind):
+    """能力测试的"通过"判定。ok_truncated 是模型自己话痨, 不影响能力。"""
+    return kind in ("ok", "ok_truncated", "ok_tool_use", "cache_passthrough",
+                    "ok_nonjson")
+
+
+def cmd_best(args, ctx):
+    """把"该用哪个"变成可辩护的推荐, 而不是拍脑袋排名。"""
+    days = args.days
+    window = f"最近 {days:g} 天" if days > 0 else "全部历史"
+    need = getattr(args, "need", None)
+    rows, used, bad = _uptime_stats(days)
+    caps = _best_caps(days) if need else {}
+
+    ranked, excluded, thin = [], [], []
+    for r in rows:
+        item = dict(r)
+        item["verdict"], item["advice"] = _uptime_verdict(r["samples"], r["ok_rate"])
+        item["caps"] = {k: v for k, v in (caps.get((r["target"], r["model"])) or {}).items()}
+        if r["samples"] < 5:
+            thin.append(item)                      # 样本不足: 单独展示, 不参与排名
+            continue
+        if need:
+            test = _CAP_TESTS[need]
+            kind = item["caps"].get(test)
+            if kind is None:
+                item["why"] = f"没测过 {test}"
+                excluded.append(item)
+                continue
+            if not _cap_ok(kind):
+                item["why"] = f"{test} 最近一次是 {kind}"
+                excluded.append(item)
+                continue
+        ranked.append(item)
+
+    # 排序: 成功率 → 最长连败(少) → p50(快) → 样本多。不发明加权分数:
+    # 编一个"综合分"只会让结论看起来比证据更确定。
+    ranked.sort(key=lambda x: (-x["ok_rate"], x["longest_streak"],
+                               x["p50_latency_ms"] or 10 ** 9, -x["samples"]))
+    ok_ranked = [r for r in ranked if r["verdict"] in ("稳", "勉强")]
+    pick = ok_ranked[0] if ok_ranked else None
+    top = getattr(args, "top", 10)
+    shown = ranked[:top]
+
+    if ctx.as_json:
+        ctx.json({"days": days, "window": window, "need": need,
+                  "reports_used": used, "unreadable_reports": bad,
+                  "pick": ({"target": pick["target"], "model": pick["model"]} if pick else None),
+                  "ranked": shown, "excluded": excluded,
+                  "insufficient_samples": [{"target": r["target"], "model": r["model"],
+                                            "samples": r["samples"]} for r in thin],
+                  "summary": {"ranked": len(ranked), "excluded": len(excluded),
+                              "insufficient": len(thin)}})
+        return 0
+
+    if bad:
+        ctx.say(f"[!] {bad} 份报告无法读取(已跳过)")
+    if not ranked and not thin and not excluded:
+        ctx.say(f"[i] {window}里还没有可用的全量体检报告(共 {used} 份)")
+        ctx.say(f"    先跑一次全量体检: {CMD} check")
+        return 0
+
+    ctx.say(f"\n=== 该用哪个  {window} / {used} 份全量报告 ===")
+    if need:
+        ctx.say(f"    已按需求过滤: 必须能 {need} ({_CAP_TESTS[need]} 测试最近一次通过)")
+    if shown:
+        ctx.say(f"  {'目标/模型':<34} {'样本':>4} {'成功率':>7} {'连败':>4} "
+                f"{'p50':>7}  判定")
+        for r in shown:
+            name = f"{r['target']}/{r['model']}"
+            p50 = f"{r['p50_latency_ms']}ms" if r["p50_latency_ms"] else "-"
+            ctx.say(f"  {name[:34]:<34} {r['samples']:>4} {r['ok_rate'] * 100:>6.1f}% "
+                    f"{r['longest_streak']:>4} {p50:>7}  {r['verdict']}")
+            if r["reasons"]:
+                why = ", ".join(f"{x['kind']}×{x['count']}" for x in r["reasons"])
+                ctx.say(f"  {'':<34} └ 主要失败: {why}")
+        if pick:
+            ctx.say(f"\n推荐: {pick['target']}/{pick['model']}  "
+                    f"({pick['ok_rate'] * 100:.1f}% / {pick['samples']} 次, "
+                    f"{pick['verdict']} —— {pick['advice']})")
+        else:
+            ctx.say("\n[!] 没有判定为「稳」或「勉强」的目标 —— 别硬选一个, "
+                    "先看 " + f"{CMD} explain")
+    else:
+        ctx.say("  (没有样本足够的候选 —— 见下方说明)")
+
+    if excluded:
+        ctx.say(f"\n以下被排除(不满足 --need {need}):")
+        for r in excluded[:top]:
+            ctx.say(f"  {r['target']}/{r['model']}: {r.get('why', '')}")
+    if thin:
+        ctx.say(f"\n样本不足({len(thin)} 项, 不参与排名):")
+        for r in thin[:top]:
+            ctx.say(f"  {r['target']}/{r['model']}: 只有 {r['samples']} 次 —— "
+                    f"多跑几轮 {CMD} check 再看")
+    ctx.say(f"\n(i) 这是证据不是保证: 排序依据是成功率/连败/p50。"
+            f"要看细节: {CMD} uptime --by-station")
+    return 0
+
+
 def cmd_uptime(args, ctx):
     rows, used, bad = _uptime_stats(args.days, getattr(args, "target", None),
                                     getattr(args, "model", None))
@@ -2222,6 +2357,14 @@ def build_parser():
                    help="按站汇总(用户选的是站, 不是模型)")
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(fn=cmd_uptime)
+
+    p = sub.add_parser("best", help="该用哪个站/模型(有证据的推荐, 样本不足就直说)")
+    p.add_argument("--days", type=float, default=7.0, help="统计窗口(默认 7, 0 = 全部)")
+    p.add_argument("--need", choices=sorted(_CAP_TESTS),
+                   help="只考虑在这项能力上最近一次通过的目标(agent→tools)")
+    p.add_argument("--top", type=int, default=10, help="最多列几行(默认 10)")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.set_defaults(fn=cmd_best)
 
     p = sub.add_parser("explain", help="这里红了, 那我该干嘛(谁的锅/换站/命令)")
     p.add_argument("--days", type=float, default=7.0, help="统计窗口(默认 7, 0 = 全部)")

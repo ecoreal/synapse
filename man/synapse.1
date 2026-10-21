@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.15.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.16.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -82,6 +82,26 @@ Python 版本。
 internal_error(Synapse 自己的 bug, 不是站的问题)、config_error(配置没写全)。
 \-\-json 时输出 {days, window, reports_used, targets:[...], summary}。
 .TP
+.B best
+监控的终点是决策: 该把哪个站/模型放进 pi。\fBbest\fR 用已有证据回答,
+并且拒绝在没有证据时回答:
+.IP \(bu 2
+样本少于 5 次的目标不参与排名, 单独列在"样本不足"里
+.IP \(bu 2
+internal\_error(我们自己的 bug)与 config\_error 不计入可用率
+.IP \(bu 2
+排序依次看: 成功率 → 最长连败 → p50 延迟 → 样本数。刻意**不**编加权总分 ——
+编出来的综合分只会让结论看起来比证据更确定
+.IP \(bu 2
+\fB\-\-need tools\fR 只保留"这项能力最近一次真的通过"的目标(做 agent 要
+tools, 长对话要 cache, 看图要 vision); 被排除的会连原因一起列出,
+不会凭空消失
+.IP \(bu 2
+没有判定为"稳/勉强"的候选时, 明确说"别硬选一个", 而不是给出第一名
+.PP
+真实数据上它一句话就说清了: tierflow 100% / p50 1.7s 与 windhub 100% /
+p50 9.8s 成功率打平, 但延迟差 5 倍 —— 平局靠延迟分胜负, 这正是排名的用处。
+
 .B explain
 .ad l
 报告只给现象(0%、连败 17、no\_channel), 不指向动作, 人只能凭猜。

@@ -21,6 +21,18 @@ pi 模型中转站的连通性监控 / 诊断 / 配置修复工具。
 > 源码目录里若还有旧数据文件，首次运行会自动复制迁移过去，原文件保留。
 > 装 Debian 包后命令就是 `synapse`（不再需要 `python3 synapse.py`）。
 
+### 该用哪个: `synapse best`
+
+监控的终点是决策。`best` 拿已有证据回答"该把哪个站/模型放进 pi"，并且在证据不足时拒绝回答：
+
+- 样本 < 5 次不参与排名（单独列"样本不足"），不拿 2 次成功吹 100% 稳
+- `internal_error`（我们自己的 bug）与 `config_error` 不计入可用率——不甩锅给站方
+- 排序依次看成功率 → 最长连败 → p50 延迟 → 样本数，**刻意不编加权总分**
+- `--need tools` 只留"这项能力最近一次真的通过"的目标；被排除的连原因一起列出
+- 没有"稳/勉强"的候选时，明说"别硬选一个"，而不是硬给第一名
+
+真实数据上一句话就够：tierflow 100% / p50 1.7s，windhub 也 100% / p50 9.8s——成功率打平，延迟差 5 倍。
+
 ### 报告里不会有你的 key
 
 `snippet` 是站方返回的原文。中转站完全可能在错误体里回显 `Authorization` 头——这不是假设。
@@ -290,7 +302,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 161 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 167 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

@@ -1,3 +1,17 @@
+synapse (1.16.0) unstable; urgency=medium
+
+  * 新增 best: 该用哪个站/模型(把监控变成决策)
+    - 样本 < 5 次不参与排名, 单独列"样本不足" —— 不拿 2 次成功吹 100% 稳
+    - internal_error/config_error 不计入可用率(不甩锅给站方)
+    - 排序: 成功率 -> 最长连败 -> p50 延迟 -> 样本数; 刻意不编加权总分
+    - --need tools|cache|vision|thinking|stream: 只留该能力最近一次真通过的;
+      被排除的连原因一起列出
+    - 没有"稳/勉强"候选时明确说"别硬选一个"
+    - --json 给出 pick/ranked/excluded/insufficient_samples, 不是只有一个赢家
+  * 测试 161 -> 167 项(含补全漂移双向比对)
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 22:15:00 +0800
+
 synapse (1.15.0) unstable; urgency=medium
 
   * 安全: snippet 落盘前脱敏, 站方回显的 key 不会再写进报告/仪表盘
