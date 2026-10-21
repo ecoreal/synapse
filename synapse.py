@@ -687,7 +687,7 @@ def _auto_issue_from_rows(rows, say=None):
             if k == "config_error":
                 nid, created = issue_add_auto(
                     db, target, "", "配置不完整",
-                    f"该站被跳过未检查: {r['snippet'][:120]}",
+                    f"该站本轮未做任何探针: {r['snippet'][:120]}",
                     cause="config.json 里缺 base_url 或 api_key(或 key_from_pi 指向的 provider 不存在)",
                     plan="补全 config.json 该目标字段, 或跑 synapse import-from-pi 重新生成")
                 changed = changed or created
