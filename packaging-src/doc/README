@@ -1,0 +1,31 @@
+Synapse — pi 模型中转站连通性监控/诊断/配置修复工具
+
+== 数据目录 ==
+
+Debian 包安装后, 所有用户数据(含站点清单和 API key)放在:
+
+    ~/.config/synapse/
+
+ * STATIONS.md   — 你维护的中转站清单(URL / API Key / 模型), 新站加这里
+ * config.json   — `synapse sync-stations` 从 STATIONS.md 生成
+ * reports/      — 每次体检的完整报告
+ * issues.json   — 问题台账
+ * .outage.json  — 长跑失败统计
+
+环境变量 SYNAPSE_HOME 可覆盖数据目录。
+
+从源码目录运行的老版本数据(config.json/STATIONS.md/issues.json/
+reports/ 等)在首次运行新版时自动复制迁移, 原文件保留不动。
+
+== 常用命令 ==
+
+    synapse status
+    synapse check -v
+    synapse check --target hyb --model z-ai/glm-5.3
+    synapse diagnose --target tierflow --model tierflow
+    synapse sync-stations --check --log
+
+探测一律只读; ~/.pi/agent/models.json 只有在
+`synapse fix --apply`(用户明确下令)时才会被修改, 且自动备份。
+
+ -- ec <ec@localhost>  2026-10-20

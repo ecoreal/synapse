@@ -1,0 +1,13 @@
+# 含明文 API Key / 运行数据，永不入库
+STATIONS.md
+config.json
+issues.json
+.outage.json
+.dirty
+.targets_snapshot.json
+reports/
+__pycache__/
+*.pyc
+dist/
+# packaging/ 整棵树都是 build-deb.sh 的生成物; 源件全部在 packaging-src/
+packaging/

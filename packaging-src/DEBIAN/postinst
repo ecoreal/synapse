@@ -1,0 +1,17 @@
+#!/bin/sh
+# 安装后提示
+cat <<'EOF'
+╭─ Synapse 已安装 ─────────────────────────────╮
+│                                              │
+│  现在可以直接运行:  synapse status           │
+│                                              │
+│  数据目录: ~/.config/synapse/                 │
+│    - STATIONS.md   ← 你的站点清单(url/key)   │
+│    - config.json   (sync-stations 生成)      │
+│    - reports/      (体检报告落盘)            │
+│                                              │
+│  从旧版(目录内)数据已自动迁移(原文件保留)。   │
+│  环境变量 SYNAPSE_HOME 可覆盖数据目录。      │
+│                                              │
+╰──────────────────────────────────────────────╯
+EOF

@@ -1,0 +1,4 @@
+#!/bin/sh
+# synapse — 壳: Debian 包入口
+# 数据不进 /usr: 全部走 ~/.config/synapse (SYNAPSE_HOME 可覆盖)
+exec /usr/bin/python3 /usr/lib/synapse/synapse.py "$@"

@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 测试 (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # 项目承诺零第三方依赖 —— 这里刻意不装任何东西, 装了就说明承诺破了
+      - name: 语法编译
+        run: python -m compileall -q synapse.py tests
+      - name: 回归测试
+        run: python -W error::ResourceWarning -m unittest discover -s tests -v
+      - name: CLI 冒烟(临时数据目录, 不碰真实配置)
+        run: |
+          tmp=$(mktemp -d)
+          cat > "$tmp/config.json" <<'JSON'
+          {"targets": {"demo": {"base_url": "https://example.invalid",
+                                "api_key": "sk-demo", "models": ["m1"]}}}
+          JSON
+          SYNAPSE_HOME="$tmp" python synapse.py --version
+          SYNAPSE_HOME="$tmp" python synapse.py status
+          SYNAPSE_HOME="$tmp" python synapse.py check --json --target demo 2>/dev/null \
+            | python -c 'import json,sys; d=json.load(sys.stdin); assert set(d) >= {"summary","results"}; print("JSON OK", d["summary"])'
+
+  package:
+    name: 打 deb 并检查内容
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 安装 lintian
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lintian
+      - name: 构建
+        run: bash build-deb.sh
+      - name: 校验包内容干净(不含任何数据/密钥)
+        run: |
+          deb=$(ls dist/*.deb)
+          echo "== $deb =="
+          dpkg-deb -c "$deb"
+          if dpkg-deb -c "$deb" | grep -Eq 'config\.json|STATIONS\.md|issues\.json|\.outage\.json|reports/'; then
+            echo "[!] 包里混入了用户数据文件" >&2; exit 1
+          fi
+          if dpkg-deb -R "$deb" /tmp/x && grep -rIlE 'sk-[A-Za-z0-9]{16,}' /tmp/x; then
+            echo "[!] 包里出现疑似 API key" >&2; exit 1
+          fi
+      - name: lintian
+        run: lintian --fail-on error dist/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb

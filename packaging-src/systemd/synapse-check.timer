@@ -1,0 +1,16 @@
+[Unit]
+Description=Synapse 定时体检(每小时)
+Documentation=man:synapse(1)
+
+[Timer]
+# 登录后先跑一轮, 之后每小时
+OnStartupSec=1min
+OnUnitActiveSec=1h
+# 错过的轮次不要扎堆补跑
+AccuracySec=1min
+RandomizedDelaySec=30s
+Persistent=false
+Unit=synapse-check.service
+
+[Install]
+WantedBy=timers.target

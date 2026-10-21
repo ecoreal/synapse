@@ -1,0 +1,16 @@
+Package: synapse
+Version: 1.3.0
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.9)
+Maintainer: ec <ec@localhost>
+Description: pi 模型中转站连通性监控/诊断/配置修复工具
+ Synapse 监控 pi 的模型中转站(API relay): 连通性检查、流式/工具调用/
+ thinking/图像/前缀缓存五维诊断、长跑失败统计、问题台账,
+ 以及(仅在用户明确 --apply 时)对 ~/.pi/agent/models.json 的安全修复。
+ .
+ 系统级定时器: synapse timer on --interval 1h (systemd 用户定时器);
+ 数据目录: ~/.config/synapse (可用 SYNAPSE_HOME 覆盖);
+ 站点清单维护: ~/.config/synapse/STATIONS.md。
+Homepage: https://localhost/synapse

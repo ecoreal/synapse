@@ -1,0 +1,14 @@
+[Unit]
+Description=Synapse 中转站连通性体检
+Documentation=man:synapse(1)
+# 没装 pi 的机器上也允许跑(只是没有 key 会报错), 所以不写 Condition
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/synapse check --auto-issue
+# check 有异常项会返回 1, 对 systemd 来说算失败; 但这是"体检发现问题"不是"服务挂了"
+SuccessExitStatus=0 1
+# 体检要发网络请求, 给足时间; 超 60s*模型 时就整体掐掉, 免挂死占资源
+TimeoutStartSec=1800
+Nice=10
+IOSchedulingClass=idle

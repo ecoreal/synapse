@@ -1,0 +1,99 @@
+.TH SYNAPSE 1 "2026-10-20" "synapse 1.0.0" "User Commands"
+.SH 名称
+synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
+.SH 概要
+.B synapse
+\fI子命令\fR [\fI选项\fR]
+.SH 描述
+.B synapse
+监控 pi 的模型中转站(API relay)。探测一律只读；
+~/.pi/agent/models.json 只有在用户明确执行
+.B fix \-\-apply
+时才会被修改, 且每次修改自动备份。
+.PP
+子命令:
+.TP
+.B check
+一次性连通性检查(支持 \-\-tools/\-\-cache/\-\-vision/\-\-json)。
+.TP
+.B watch
+周期监控(前台常驻)。
+.TP
+.B diagnose
+单模型深度诊断(基础/流式/工具/thinking/图像/缓存)。
+.TP
+.B fix
+修复 pi 配置(默认只预览 diff, 加 \-\-apply 才写入)。
+.TP
+.B import\-from\-pi
+从 ~/.pi/agent/models.json 导入目标。
+.TP
+.B cron
+用 crontab 做定期检查(\-\-install)。
+.TP
+.B timer
+systemd 用户定时器管理: on \-\-interval 1h / off / status / log / run。
+比 crontab 更符合 Debian 惯例, 且不依赖登录的 shell 环境。
+.TP
+.B issue
+问题台账: add/list/note/status/rm。
+.TP
+.B sync\-stations
+从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
+.TP
+.B status
+一览: 目标清单 + 台账 + 长跑失败统计。
+.SH 文件
+.TP
+.I ~/.config/synapse/STATIONS.md
+用户维护的中转站清单(URL / API key / 模型)。
+.TP
+.I ~/.config/synapse/config.json
+sync-stations 生成的目标清单。以原子方式写入(临时文件 + fsync + rename),
+写入失败不会损坏旧内容; 文件权限 0600(内含明文 key)。
+.TP
+.I ~/.config/synapse/reports/
+体检报告(每次 check 按时间戳落盘)。
+.TP
+.I ~/.config/synapse/.outage.json
+长跑失败统计(每 目标||模型 的 ok/fail/连败轮数)。
+.TP
+.I ~/.config/synapse/issues.json
+问题台账(手工单与 auto-issue 自动单)。
+.TP
+.I ~/.config/synapse/.targets_snapshot.json
+上次体检的目标清单快照, 用于提醒"清单有变更未复查"。
+
+.SH 环境变量
+.TP
+.I SYNAPSE_HOME
+覆盖数据目录(默认 ~/.config/synapse)。
+.TP
+.I SYNAPSE_PROBE_TEXT
+体检用的探测文本(默认 "请只回复两个字：正常")。
+被站方反测活拦截时换一段正常对话即可, 无需改源码。
+.SH 定时体检
+.nf
+synapse timer on \-\-interval 1h     # 启用 systemd 用户定时器(每小时)
+synapse timer on \-\-interval 30min  # 改间隔
+synapse timer status                 # 看下次触发时间
+synapse timer run                    # 立即跑一轮
+synapse timer log                    # 看最近 50 行 journal
+synapse timer off                    # 停用
+synapse cron \-\-install               # 无 systemd 环境用 crontab
+.fi
+.SH 退出码
+.B check
+正常返回 0, 有异常项返回 1, 可用于脚本/监控。
+目标配置不完整(缺 base_url / api_key)记为异常项并返回 1 ——
+这类站不会被静默跳过, 保证"退出码 0"确实意味着所有目标都跑过。
+.SH 示例
+.PP
+.nf
+synapse \-\-version
+synapse status
+synapse check \-v
+synapse check \-\-target hyb \-\-model z\-ai/glm\-5.3
+synapse diagnose \-\-target tierflow \-\-model tierflow
+synapse fix \-\-target hyb \-\-model z\-ai/glm\-5.3 \-\-fix disable\-reasoning \-\-apply
+.fi
