@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 
 def _init_home():
@@ -1385,6 +1385,7 @@ def _explain_counts(days=7.0):
     cutoff = datetime.datetime.now() - datetime.timedelta(days=days) if days > 0 else None
     entries = [e for e in _report_entries("check") if cutoff is None or e[0] >= cutoff]
     acc = {}
+    oks = {}                     # 目标 -> 同窗口成功轮数(用来打脸"key 坏了"这种结论)
     used = 0
     bad = 0
     for _ts, path in reversed(entries):
@@ -1406,28 +1407,47 @@ def _explain_counts(days=7.0):
                 continue
             kind = r.get("kind") or "?"
             if kind in _OK_KINDS:
+                oks[r.get("target") or "?"] = oks.get(r.get("target") or "?", 0) + 1
                 continue
             t, m = r.get("target") or "?", r.get("model") or "?"
             a = acc.setdefault(kind, {"total": 0, "targets": {}})
             a["total"] += 1
             a["targets"][(t, m)] = a["targets"].get((t, m), 0) + 1
-    return acc, used, bad
+    return acc, used, bad, oks
 
 
 def _explain_groups(days=7.0, limit=3):
     """把 kind 聚合成"人话 + 该敲的命令"。排序按影响面, 不按字母。"""
-    acc, used, bad = _explain_counts(days)
+    acc, used, bad, oks = _explain_counts(days)
     groups = []
     for kind, a in acc.items():
-        info = PLAYBOOK.get(kind) or {
+        info = dict(PLAYBOOK.get(kind) or {
             "owner": "?",
             "meaning": "未知判定(可能是新版本/hand-edited 的报告)",
             "advice": "别猜: 跑 doctor, 把这条报给 Synapse",
             "commands": ["{c} doctor"],
-        }
+        })
         pairs = sorted(a["targets"].items(), key=lambda kv: (-kv[1], kv[0]))
         shown = pairs[:limit]
         t0, m0 = shown[0][0]
+
+        # 反证: 同一把 key 在同一站的其他模型上如果是通的, 那问题就不在 key。
+        # 真实数据里 5 个站全都同时有 auth_failed 和成功轮 —— 一律让人换 key
+        # 会浪费掉一整个晚上, 而 key 根本没坏。
+        counter = []
+        if kind == "auth_failed":
+            for (t, _m), _n in pairs:
+                if oks.get(t):
+                    counter.append({"target": t, "ok": oks[t]})
+            if counter and len(counter) == len({t for (t, _m) in pairs}):
+                info["owner"] = "站方/模型"
+                info["meaning"] = ("这些模型在站方那边没有权限/分组/欠费被拒, "
+                                   "不是你的 key 失效")
+                info["advice"] = ("不用换 key(同一把 key 在该站其他模型上是通的); "
+                                  "换模型分组 or 找站方开通, 换 key 白费力气")
+                info["commands"] = ["{c} diagnose --target {t} --model {m}",
+                                    "{c} sync-stations --check"]
+
         cmds = [c.format(c=CMD, t=t0, m=m0) for c in info["commands"]]
         groups.append({
             "kind": kind,
@@ -1435,6 +1455,7 @@ def _explain_groups(days=7.0, limit=3):
             "meaning": info["meaning"],
             "advice": info["advice"],
             "count": a["total"],
+            "counter_evidence": counter,
             "targets": [{"target": t, "model": m, "count": n} for (t, m), n in pairs],
             "shown_targets": len(shown),
             "commands": cmds,
@@ -1500,6 +1521,10 @@ def cmd_explain(args, ctx):
         if more > 0:
             face += f" … 还有 {more} 个"
         ctx.say(f"  影响: {face}")
+        if g.get("counter_evidence"):
+            ce = ", ".join(f"{x['target']} 有 {x['ok']} 次成功"
+                           for x in g["counter_evidence"])
+            ctx.say(f"  反证: {ce} → key 是好的, 问题在模型权限")
         for c in g["commands"]:
             ctx.say(f"  → {c}")
     if internal:

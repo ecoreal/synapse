@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.13.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.14.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -96,6 +96,9 @@ explain 把现象翻译成三件事: \fB这是谁的锅\fR(站方 / 你 / 我们
 \-\-days N 窗口(默认 7, 0 = 全部); \-\-limit N 每类列几个目标(默认 3);
 \-\-json 输出 {days, reports\_used, internal\_errors, groups:[{kind, owner,
 meaning, advice, count, targets, commands}]}。
+\fB反证\fR: auth\_failed 时, 会拿同一窗口内该站所有成功轮当反证 ——
+同一把 key 在别的模型上通, 就说明坏的不是 key, 而是那几个模型在站方的权限/分组,
+这时给出"不用换 key"。没有反证时才指向 key。
 同样的内容也会出现在 \fBreport\fR 生成的仪表盘顶部"该做什么"一栏。
 .TP
 .B report

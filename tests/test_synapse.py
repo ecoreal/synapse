@@ -1933,6 +1933,39 @@ class TestExplain(unittest.TestCase):
         self.assertIn("owner", d["groups"][0])
         self.assertTrue(d["groups"][0]["commands"])
 
+
+    def test_auth_failed_plus_same_station_success_is_not_a_key_problem(self):
+        """真实数据里 5 个站都同时有 auth_failed 和成功轮 —— 同一把 key。
+
+        这时候让人去换 key 是纯粹的浪费: key 是好的, 坏的是那几个模型在
+        站方那边的权限/分组。工具必须用同一窗口的成功轮当反证。
+        """
+        self._round("20261020-100000", [self._row("hyb", "m1", "auth_failed"),
+                                        self._row("hyb", "m1", "auth_failed"),
+                                        self._row("hyb", "m2", "ok")])
+        synapse.main(["explain", "--days", "0"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("反证", text)
+        self.assertIn("不用换 key", text)
+        self.assertNotIn("锅: 你", text)
+
+    def test_auth_failed_alone_still_points_at_the_key(self):
+        """没有反证时该怀疑 key 就得怀疑 key —— 不能为了好看把真问题盖掉。"""
+        self._round("20261020-100000", [self._row("solo", "m1", "auth_failed")])
+        synapse.main(["explain", "--days", "0"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("锅: 你", text)
+        self.assertNotIn("反证", text)
+
+    def test_counter_evidence_is_in_the_json(self):
+        """脚本用户也要能拿到反证, 否则他们只能自己重新算一遍。"""
+        self._round("20261020-100000", [self._row("hyb", "m1", "auth_failed"),
+                                        self._row("hyb", "m2", "ok")])
+        synapse.main(["explain", "--days", "0", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        g = [x for x in d["groups"] if x["kind"] == "auth_failed"][0]
+        self.assertEqual(g["counter_evidence"], [{"target": "hyb", "ok": 1}])
+
     def test_nothing_to_do_is_stated_not_silent(self):
         self._round("20261020-100000", [{"target": "alpha", "model": "m1", "kind": "ok",
                                         "http": 200, "latency_ms": 900,

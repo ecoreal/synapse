@@ -1,3 +1,16 @@
+synapse (1.14.0) unstable; urgency=medium
+
+  * explain: auth_failed 会用同窗口成功轮当反证, 不再默认让人换 key
+    - 真实数据上 5 个站全都同时有 auth_failed 和成功轮(同一把 key),
+      原来的建议会让用户白换 5 把 key
+    - 有反证时改判"站方/模型": 这些模型在站方没权限/分组/欠费,
+      不是 key 失效; 换模型分组或找站方开通
+    - 没有反证时仍然指向 key —— 不能为了好看把真问题盖掉
+    - --json 增加 counter_evidence: [{target, ok}]
+  * 测试 152 -> 155 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 21:45:00 +0800
+
 synapse (1.13.0) unstable; urgency=medium
 
   * 新增 explain: 把"这里红了"翻译成"这是谁的锅 / 要不要换站 / 敲哪条命令"
