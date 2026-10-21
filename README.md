@@ -92,6 +92,10 @@ python3 synapse.py status
 python3 synapse.py status --json          # 机读版
 python3 synapse.py status --stale-hours 2  # 超过 2h 没全量体检就告警(默认 3)
 
+# 诊断"这个工具自己": 数据目录位置/权限、定时器是否还活着、时钟、台账陈旧度
+python3 synapse.py doctor
+python3 synapse.py doctor --json | jq '.summary'   # {"ok":7,"warn":2,"fail":0}
+
 # 机器可读输出不止 check: 脚本要能问"这站到底怎么了"、"台账里有什么"
 python3 synapse.py diagnose --target hyb --model z-ai/glm-5.3 --json | jq '.conclusions'
 python3 synapse.py issue list --json | jq '.open'
@@ -220,7 +224,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 72 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 84 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

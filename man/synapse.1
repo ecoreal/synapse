@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.6.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.7.0" "User Commands"
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
 .SH 概要
@@ -43,6 +43,15 @@ list 支持 \-\-json 输出 {total, open, filter, issues}。
 .TP
 .B sync\-stations
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
+.TP
+.B doctor
+自检: 诊断 Synapse 自己(只读, 不联网)。检查数据目录是否落在代码目录里、
+config.json 的权限(内含明文 key, 非 0600 会警告)、key_from_pi 引用是否
+能解析、最近一次全量体检的新鲜度、本机时钟是否异常(报告时间在未来)、
+是否还有任何机制在定期体检、台账里长期 open 的条目、报告目录体积、脏标记、
+Python 版本。
+出现故障项返回 1; 只有警告项返回 0。
+\-\-json 时输出 {time, checks:[{level,name,detail,hint}], summary}。
 .TP
 .B status
 一览: 目标清单 + 台账 + 长跑失败统计 + 最近一次全量体检的新鲜度。
@@ -90,7 +99,7 @@ synapse timer off                    # 停用
 synapse cron \-\-install               # 无 systemd 环境用 crontab
 .fi
 .SH 退出码
-0 正常 / 1 有异常项或配置缺失 / 2 用法错误, 可用于脚本/监控。
+0 正常 / 1 有异常项、配置缺失或自检有故障 / 2 用法错误, 可用于脚本/监控。
 目标配置不完整(缺 base_url / api_key)记为异常项并返回 1 ——
 这类站不会被静默跳过, 保证"退出码 0"确实意味着所有目标都跑过。
 若出现 "Synapse 内部错误"(internal_error), 那是本程序的 bug,

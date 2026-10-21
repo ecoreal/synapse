@@ -5,13 +5,38 @@
 跑:  python3 -m unittest discover -s tests -v
 不需要网络, 不发任何请求。
 """
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import synapse  # noqa: E402
+
+# 全模块统一隔离数据目录。教训: 之前 test_disappeared_target_marks_dirty 会经
+# mark_dirty() 把 "目标被移除/禁用: ghost" 写进用户真实的
+# ~/.config/synapse/.dirty, 于是 status/doctor 长期显示一条压根没发生的告警 ——
+# 测试污染被当成了真实信号, 这比没有告警更糟(会让人去查一个不存在的问题)。
+# 单个测试类可以在这个基础上继续覆盖, 但默认值永远不指向真实数据。
+_TESTS_TMP = tempfile.mkdtemp(prefix="synapse-tests-")
+
+
+def _isolate_test_paths(root=_TESTS_TMP):
+    synapse.HOME = root
+    synapse.CONFIG = os.path.join(root, "config.json")
+    synapse.STATIONS = os.path.join(root, "STATIONS.md")
+    synapse.REPORTS = os.path.join(root, "reports")
+    synapse.ISSUES = os.path.join(root, "issues.json")
+    synapse.LOCK = os.path.join(root, ".dirty")
+    synapse.PI_MODELS = os.path.join(root, "pi", "models.json")
+    os.makedirs(synapse.REPORTS, exist_ok=True)
+
+
+_isolate_test_paths()
+atexit.register(shutil.rmtree, _TESTS_TMP, True)
 
 WAF_HTML = ("<!DOCTYPE html><html lang=\"zh\"><head><title>访问已被拦截</title>"
             "<meta charset=\"utf-8\"></head><body>您的访问已被拦截</body></html>")
@@ -393,6 +418,146 @@ class TestStatusFreshness(unittest.TestCase):
                           {"time": "????", "summary": {"total": 1}, "results": []})
         self.assertEqual(self._run("status"), 0)
         self.assertIn("最近一次体检", self.out.getvalue())
+
+
+class TestTestIsolation(unittest.TestCase):
+    """守门测试: 测试自身绝不能读写真实数据目录。
+
+    真出过事 —— mark_dirty() 把一条假告警写进了用户真实的 .dirty。
+    这里断言所有数据路径都在隔离目录内, 新增路径常量漏了就会红。
+    """
+
+    def test_all_data_paths_live_under_isolated_home(self):
+        for name in ("CONFIG", "STATIONS", "REPORTS", "ISSUES", "LOCK", "PI_MODELS"):
+            path = os.path.abspath(getattr(synapse, name))
+            self.assertTrue(path.startswith(os.path.abspath(synapse.HOME)),
+                            f"{name}={path} 跑到隔离目录 {synapse.HOME} 外面去了")
+
+    def test_isolated_home_is_not_the_real_one(self):
+        real = os.path.abspath(os.path.expanduser("~/.config/synapse"))
+        self.assertFalse(os.path.abspath(synapse.HOME).startswith(real),
+                         "测试的 HOME 指向了真实数据目录, 会污染用户数据")
+
+    def test_mark_dirty_writes_under_isolation(self):
+        synapse.mark_dirty("guard-test")
+        try:
+            self.assertTrue(synapse.LOCK.startswith(_TESTS_TMP))
+            self.assertIn("guard-test", synapse.read_dirty())
+        finally:
+            synapse.clear_dirty()
+
+
+class TestDoctor(unittest.TestCase):
+    """doctor: 诊断 Synapse 自己。
+
+    能诊断中转站的工具, 却诊断不了自己 —— 前面几轮踩的坑(timer 悄悄停掉、
+    SYNAPSE_HOME 继承了旧数据、config 权限 0644 泄露 key)全属于这一类。
+    doctor 把这些变成可执行的检查项, 而不是靠人记得。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "PI_MODELS", "BASE",
+                        "LOCK", "CMD")}
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")   # 脏标记也必须隔离, 否则读到真实数据
+        synapse.CMD = "synapse"
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.PI_MODELS = os.path.join(self.tmp, "pi-models.json")
+        os.makedirs(synapse.REPORTS, exist_ok=True)
+        self._saved_sched = synapse._schedule_status
+        synapse._schedule_status = lambda: (True, "测试: 定时器已启用")
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+        synapse._schedule_status = self._saved_sched
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        self.err.seek(0); self.err.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def _healthy(self, hours_ago=0.1):
+        import datetime as dt
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {
+            "base_url": "https://a.invalid", "api_key": "sk-1",
+            "models": ["m"], "enabled": True, "default": True}}})
+        synapse.save_json(synapse.PI_MODELS, {"providers": {"t": {"models": [{"id": "m"}]}}})
+        t = dt.datetime.now() - dt.timedelta(hours=hours_ago)
+        synapse.save_json(os.path.join(synapse.REPORTS, "latest.json"), {
+            "time": t.strftime("%Y-%m-%d %H:%M:%S"),
+            "summary": {"total": 1, "ok": 1}})
+
+    def test_missing_config_is_a_failure(self):
+        rc = self._run("doctor")
+        self.assertEqual(rc, 1)
+        self.assertIn("config.json", self.out.getvalue())
+
+    def test_healthy_setup_passes(self):
+        self._healthy()
+        rc = self._run("doctor")
+        self.assertEqual(rc, 0, self.out.getvalue())
+        self.assertIn("全部通过", self.out.getvalue())
+
+    def test_world_readable_config_leaks_keys(self):
+        self._healthy()
+        os.chmod(synapse.CONFIG, 0o644)
+        self._run("doctor")
+        self.assertIn("权限", self.out.getvalue())
+
+    def test_nobody_scheduled_is_called_out(self):
+        self._healthy()
+        synapse._schedule_status = lambda: (False, "既没有定时器也没有 crontab")
+        rc = self._run("doctor")
+        self.assertIn("crontab", self.out.getvalue())
+        self.assertEqual(rc, 0, "没人定期体检是警告, 不算故障")
+
+    def test_dangling_key_from_pi_is_reported(self):
+        self._healthy()
+        cfg = synapse.load_json(synapse.CONFIG, {})
+        cfg["targets"]["t"] = {"key_from_pi": "nope", "models": ["m"], "enabled": True}
+        synapse.save_json(synapse.CONFIG, cfg)
+        self._run("doctor")
+        self.assertIn("nope", self.out.getvalue())
+
+    def test_future_timestamp_means_clock_skew(self):
+        self._healthy(hours_ago=-5)
+        self._run("doctor")
+        self.assertIn("时钟", self.out.getvalue())
+
+    def test_data_dir_inside_code_dir_is_a_failure(self):
+        self._healthy()
+        synapse.BASE = self.tmp
+        rc = self._run("doctor")
+        self.assertEqual(rc, 1)
+        self.assertIn("数据目录", self.out.getvalue())
+
+    def test_stale_open_issue_is_reported(self):
+        import datetime as dt
+        self._healthy()
+        old = (dt.datetime.now() - dt.timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+        synapse.save_json(synapse.ISSUES, {"issues": [{
+            "id": 1, "time": old, "status": "open", "target": "t", "model": "m",
+            "kind": "x", "symptom": "s", "cause": "", "plan": "", "notes": []}]})
+        self._run("doctor")
+        self.assertIn("30 天", self.out.getvalue())
+
+    def test_json_output_is_parseable(self):
+        self._healthy()
+        self._run("doctor", "--json")
+        import json as _j
+        d = _j.loads(self.out.getvalue())
+        self.assertIn("checks", d)
+        self.assertIn("summary", d)
+        levels = {c["level"] for c in d["checks"]}
+        self.assertTrue(levels <= {"ok", "warn", "fail"})
 
 
 class TestDocsConsistency(unittest.TestCase):

@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import time
@@ -27,7 +28,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 
 def _init_home():
@@ -1166,6 +1167,190 @@ def cmd_status(args, ctx):
     return 0
 
 
+def _schedule_status():
+    """有没有任何机制在定期跑 check? 返回 (bool, 说明)。
+
+    systemd 定时器被 disable 掉是最安静的一种失效: 不报错, 只是不再有新的
+    体检。doctor 必须能说出"现在没人看"这句话。
+    """
+    rc, out = _systemctl("is-enabled", TIMER_UNIT)
+    o = (out or "").strip().splitlines()
+    o = o[0].strip() if o else ""
+    if rc == 0 and o and "disabled" not in o:
+        return True, f"systemd 用户定时器 {TIMER_UNIT} 已启用({o})"
+    note = "本机没有 systemd --user" if rc == 127 else f"{TIMER_UNIT} 未启用({o or '状态未知'})"
+    try:
+        cr = subprocess.run(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+        txt = cr.stdout or ""
+        if "synapse" in txt and "check" in txt:
+            return True, "crontab 里有 synapse check"
+        note += "; crontab 里也没有 synapse check"
+    except (OSError, subprocess.SubprocessError):
+        note += "; 读不到 crontab"
+    return False, note
+
+
+def _doctor_checks(stale_hours=3.0):
+    """Synapse 自检: 每项都是只读本地检查, 不联网。返回 [{level,name,detail,hint}]。"""
+    rows = []
+
+    def add(level, name, detail, hint=""):
+        rows.append({"level": level, "name": name, "detail": detail, "hint": hint})
+
+    # 1. 数据目录: 必须在代码目录之外(否则升级/重装会连数据一起覆盖)
+    home_abs, base_abs = os.path.abspath(HOME), os.path.abspath(BASE)
+    if home_abs == base_abs or home_abs.startswith(base_abs + os.sep):
+        add("fail", "数据目录", f"数据目录落在代码目录里: {home_abs}",
+            f"用 SYNAPSE_HOME 指到 ~/.config/synapse(默认就是), 别放在源码树里")
+    elif not os.path.isdir(home_abs):
+        add("fail", "数据目录", f"不存在: {home_abs}", "跑任意子命令会自动创建")
+    elif not os.access(home_abs, os.W_OK):
+        add("fail", "数据目录", f"不可写: {home_abs}", "检查属主/权限")
+    else:
+        add("ok", "数据目录", home_abs)
+
+    # 2. config.json: 存在性 + 目标数 + 默认站 + 权限(内含明文 key)
+    cfg = load_json(CONFIG, None)
+    tg = {}
+    if cfg is None:
+        add("fail", "config.json", f"不存在或不是合法 JSON: {CONFIG}",
+            f"先运行: {CMD} import-from-pi (或 {CMD} sync-stations)")
+    else:
+        tg = cfg.get("targets") or {}
+        enabled = [n for n, e in tg.items() if e.get("enabled", True)]
+        if not tg:
+            add("fail", "config.json", "没有任何 target", f"运行 {CMD} import-from-pi")
+        else:
+            dflt = [n for n, e in tg.items() if e.get("default")]
+            add("ok", "config.json", f"{len(tg)} 个目标, {len(enabled)} 个启用"
+                + (f", 默认 {dflt[0]}" if dflt else ""))
+            if not dflt:
+                add("warn", "默认目标", "没有任何目标标着 default",
+                    "在 config.json 里给常用站加 \"default\": true")
+        try:
+            mode = stat.S_IMODE(os.stat(CONFIG).st_mode)
+        except OSError as e:
+            add("warn", "config.json 权限", f"读不到权限位: {e}")
+        else:
+            if mode & 0o077:
+                add("warn", "config.json 权限",
+                    f"{oct(mode)} 对同组/其他用户可读, 而里面有明文 api_key",
+                    f"chmod 600 {CONFIG}")
+            else:
+                add("ok", "config.json 权限", oct(mode))
+
+    # 3. key_from_pi 引用: 指向的 provider 必须真的存在, 否则该目标永远配置不完整
+    provs = (load_json(PI_MODELS, None) or {}).get("providers") or {}
+    dangling = [f"{n}→{e['key_from_pi']}" for n, e in tg.items()
+                if e.get("key_from_pi") and e["key_from_pi"] not in provs]
+    if dangling:
+        add("warn", "key_from_pi 引用", "这些引用在 pi 配置里找不到: " + ", ".join(dangling),
+            "补上 pi 里的 provider, 或在 config 里直接填 base_url/api_key")
+    elif any(e.get("key_from_pi") for e in tg.values()):
+        add("ok", "key_from_pi 引用", f"{len(provs)} 个 provider 全部可解析")
+    elif tg:
+        add("ok", "key_from_pi 引用", "未使用 key_from_pi 引用")
+
+    # 4. 最近一次全量体检 + 时钟: 时间在未来说明本机时钟/时区不对, 统计会全错
+    last = _last_check(stale_hours)
+    if last is None:
+        add("warn", "最近一次全量体检", "没有 reports/latest.json",
+            f"跑一次全量体检: {CMD} check")
+    else:
+        age = last["age_hours"]
+        if age is not None and age < -0.1:
+            add("warn", "时钟", f"latest.json 的时间在未来({last['time']}), 本机时钟/时区可能不对",
+                "校时: sudo timedatectl set-ntp true")
+        elif age is None:
+            add("warn", "最近一次全量体检", f"时间无法解析: {last['time']!r}")
+        elif last["stale"]:
+            add("warn", "最近一次全量体检",
+                f"{last['time']} ({age:.1f}h 前), 已超过 {stale_hours}h 阈值",
+                f"检查: {CMD} timer status")
+        else:
+            add("ok", "最近一次全量体检", f"{last['time']} ({age:.1f}h 前)")
+
+    # 5. 是否有东西在定期跑
+    scheduled, how = _schedule_status()
+    add("ok" if scheduled else "warn", "定期体检", how,
+        "" if scheduled else f"启用: {CMD} timer on --interval 1h --now")
+
+    # 6. 台账: 能解析, 且长期 open 的单要有人处理
+    try:
+        db = load_issues()
+    except SynapseExit as e:
+        add("fail", "问题台账", f"读不出来: {e.message}")
+    else:
+        open_is = [i for i in db["issues"] if i.get("status") in ("open", "doing")]
+        if not open_is:
+            add("ok", "问题台账", f"共 {len(db['issues'])} 条, 无未解决")
+        else:
+            ages = []
+            for i in open_is:
+                a = _age_hours(i.get("time"))
+                if a is not None:
+                    ages.append(a / 24.0)
+            if ages and max(ages) > 14:
+                add("warn", "问题台账",
+                    f"未解决 {len(open_is)} 条, 最老一条已 open {max(ages):.0f} 天",
+                    f"review: {CMD} issue list --status open")
+            else:
+                add("ok", "问题台账", f"未解决 {len(open_is)} 条, 都在 14 天内")
+
+    # 7. 报告目录: 只报事实, 超过阈值才提醒(磁盘是会被撑满的)
+    try:
+        names = [n for n in os.listdir(REPORTS) if n.endswith(".json")]
+        total = sum(os.path.getsize(os.path.join(REPORTS, n)) for n in names)
+    except OSError:
+        add("ok", "报告目录", "还没有报告")
+    else:
+        msg = f"{len(names)} 个报告, {total / 1048576:.1f} MB"
+        if len(names) > 500 or total > 50 * 1048576:
+            add("warn", "报告目录", msg, f"可以清理旧报告: rm -f {REPORTS}/check-*.json")
+        else:
+            add("ok", "报告目录", msg)
+
+    # 8. 脏标记: 目标清单改过但没做全量复查
+    dirty = read_dirty()
+    if dirty:
+        ts, what = (dirty.split("\t", 1) + [""])[:2]
+        add("warn", "脏标记", f"{what} (自 {ts}) 尚未全量复查",
+            f"跑一次全量: {CMD} check (定向抽查不算)")
+    else:
+        add("ok", "脏标记", "无")
+
+    # 9. 运行环境
+    v = sys.version_info
+    if (v.major, v.minor) >= (3, 8):
+        add("ok", "Python", f"{v.major}.{v.minor}.{v.micro}")
+    else:
+        add("fail", "Python", f"{v.major}.{v.minor}.{v.micro} 太旧", "需要 3.8+")
+    return rows
+
+
+def cmd_doctor(args, ctx):
+    """自检: 诊断 Synapse 自己(只读, 不联网)。"""
+    rows = _doctor_checks(getattr(args, "stale_hours", 3.0))
+    icon = {"ok": "✔", "warn": "⚠", "fail": "✘"}
+    summary = {lv: sum(1 for r in rows if r["level"] == lv) for lv in ("ok", "warn", "fail")}
+    if ctx.as_json:
+        ctx.json({"time": now(), "checks": rows, "summary": summary})
+    else:
+        ctx.say(f"\n=== Synapse 自检  {now()} ===")
+        for r in rows:
+            ctx.say(f"  {icon[r['level']]} {r['name']}: {r['detail']}")
+            if r["hint"] and r["level"] != "ok":
+                ctx.say(f"      → {r['hint']}")
+        ctx.say(f"\n通过 {summary['ok']} 项, 警告 {summary['warn']} 项, 故障 {summary['fail']} 项")
+        if not summary["fail"] and not summary["warn"]:
+            ctx.say("全部通过。")
+        elif not summary["fail"]:
+            ctx.say("没有故障, 上面几条警告值得处理一下。")
+        else:
+            ctx.say("有故障项, 先按 → 后面的提示修。")
+    return 1 if summary["fail"] else 0
+
+
 def _synced_log_line():
     rep = load_json(os.path.join(REPORTS, "latest.json"), {}) or {}
     s = rep.get("summary") or {}
@@ -1679,6 +1864,12 @@ def main(argv=None, out=None, err=None):
     p.add_argument("--log", action="store_true",
                    help="把最近一次体检摘要回写到 STATIONS.md 日志区")
     p.set_defaults(fn=cmd_sync_stations)
+
+    p = sub.add_parser("doctor", help="自检: 数据目录/权限/定时器/新鲜度/台账(只读, 不联网)")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.add_argument("--stale-hours", type=float, default=3.0,
+                   help="超过这么多小时没有全量体检就算陈旧(默认 3)")
+    p.set_defaults(fn=cmd_doctor)
 
     p = sub.add_parser("status", help="一览: 目标清单 + 台账 + 长跑失败统计 + 上次体检新鲜度")
     p.add_argument("--json", dest="as_json", action="store_true")

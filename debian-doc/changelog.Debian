@@ -1,3 +1,21 @@
+synapse (1.7.0) unstable; urgency=medium
+
+  * 新增 doctor 子命令: 自检(只读, 不联网)。能诊断中转站的工具原先诊断不了
+    自己, 前几轮踩的坑(timer 悄悄停掉、SYNAPSE_HOME 继承旧数据、config
+    权限 0644 泄露 key)全得靠人记得, 现在变成可执行检查项:
+      数据目录是否落在代码目录里 / config.json 权限 / key_from_pi 引用 /
+      全量体检新鲜度 / 本机时钟是否让报告时间落在未来 / 是否有任何机制在
+      定期体检 / 台账长期 open 条目 / 报告目录体积 / 脏标记 / Python 版本
+    故障项返回 1, 仅警告返回 0; --json 输出 {checks, summary}
+  * 修测试污染: test_disappeared_target_marks_dirty 会经 mark_dirty() 把
+    "目标被移除/禁用: ghost" 写进用户真实的 ~/.config/synapse/.dirty,
+    导致 status/doctor 长期显示一条从未发生的告警(假信号比没告警更糟)
+    —— 现在整个测试模块统一重定向数据目录, 并加了守门测试断言所有路径
+    常量都在隔离目录内、HOME 不指向真实目录
+  * 测试 72 -> 84 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 17:40:00 +0800
+
 synapse (1.6.0) unstable; urgency=medium
 
   * status 新增"最近一次全量体检"新鲜度: 显示时间/年龄/上轮统计。
