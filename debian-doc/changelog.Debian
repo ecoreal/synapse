@@ -1,3 +1,18 @@
+synapse (1.12.0) unstable; urgency=medium
+
+  * 新增 report: 生成单文件离线体检仪表盘(HTML, 内联 SVG)
+    - 总体指标卡 / 站级记分卡 / 可用性时间线热力图(每格一轮) /
+      失败原因分布 / 延迟趋势 sparkline / 未解决问题清单
+    - 全程不引用任何外部脚本、样式、字体、图片: 断网机器上也能打开
+    - 原子写入, 中途失败不会留下半张网页; 不参与 prune 清理候选
+  * 解析器构建抽成 build_parser(), 补全漂移测试改为内省真实 argparse
+    - 顺带抓出并修掉三处历史漂移: issue --note(不存在)、
+      import-from-pi 一个参数都没列、check 缺 --auto-issue
+  * 新增渲染层 synapse_dashboard.py(纯函数, 数据 → HTML, 不读盘不联网)
+  * 测试 138 -> 145 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 21:10:00 +0800
+
 synapse (1.11.0) unstable; urgency=medium
 
   * 坏数据不再"装死": config.json / issues.json / pi models.json 损坏时

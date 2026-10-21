@@ -1277,6 +1277,54 @@ class TestDoctor(unittest.TestCase):
         self.assertTrue(levels <= {"ok", "warn", "fail"})
 
 
+def _parser_choices():
+    """{子命令: 它的 subparser}, 直接来自 argparse 本体。"""
+    ap = synapse_mod.build_parser()
+    group = ap._subparsers._group_actions[0]
+    return dict(group.choices)
+
+
+def _parser_subcommands():
+    return set(_parser_choices())
+
+
+def _completion_path():
+    return os.path.join(os.path.dirname(synapse_mod.__file__),
+                        "packaging-src", "bash-completion", "synapse")
+
+
+def _completion_subs():
+    with open(_completion_path(), encoding="utf-8") as f:
+        for line in f:
+            if line.strip().startswith("subs="):
+                return set(line.split('"')[1].split())
+    raise AssertionError("补全文件里找不到 subs= 行")
+
+
+def _completion_opts_blocks():
+    """{子命令: [候选词...]}, 解析 case 语句里的 opts="..." 行。
+
+    允许一条 case 用 a|b) 覆盖多个子命令, 但同时也要求它们参数确实一致
+    (不一致就该拆开 —— 合并块正是历史漂移的温床)。
+    """
+    import re
+    with open(_completion_path(), encoding="utf-8") as f:
+        src = f.read()
+    blocks, pending = {}, None
+    for line in src.splitlines():
+        m = re.match(r"\s*([a-z|*-]+)\)\s*$", line)
+        if m:
+            pending = m.group(1)
+            continue
+        m = re.match(r'\s*opts="([^"]*)"', line)
+        if m and pending:
+            for name in pending.split("|"):
+                if name not in ("*",):
+                    blocks[name] = m.group(1).split()
+            pending = None
+    return blocks
+
+
 class TestDocsConsistency(unittest.TestCase):
     """文档里的版本号必须和代码一致。
 
@@ -1309,19 +1357,32 @@ class TestDocsConsistency(unittest.TestCase):
         这里直接从 synapse.py 里抽 sub.add_parser("<name>") 的真名单, 和补全文件比对,
         新增子命令忘了补就会红。
         """
-        import re
-        with open(synapse_mod.__file__, encoding="utf-8") as f:
-            src = f.read()
-        subs = set(re.findall(r'sub\.add_parser\(\s*"([a-z][a-z-]*)"', src))
-        self.assertTrue(subs, "没能从源码里抽到子命令列表(抽取逻辑失效了)")
-        with open(os.path.join(os.path.dirname(synapse_mod.__file__),
-                               "packaging-src", "bash-completion", "synapse"),
-                  encoding="utf-8") as f:
-            comp = f.read()
-        line = [l for l in comp.splitlines() if l.strip().startswith("subs=")][0]
-        listed = set(line.split('"')[1].split())
+        subs = _parser_subcommands()
+        self.assertTrue(subs, "没能从 parser 里取到子命令列表(抽取逻辑失效了)")
+        listed = _completion_subs()
         self.assertEqual(subs - listed, set(), "补全文件漏了这些子命令")
         self.assertEqual(listed - subs, set(), "补全文件列出了已不存在的子命令")
+
+    def test_bash_completion_opts_match_parser(self):
+        """子命令对了不算完 —— 每个子命令的参数也要对上。
+
+        历史遗留: 补全里长期挂着一个 parser 中并不存在的 issue --note,
+        以及 import-from-pi 一个参数都没列(落到 * 分支只剩 --help)。
+        用户 Tab 出来的候选错了, 比没有补全更让人怀疑工具坏了。
+        """
+        blocks = _completion_opts_blocks()
+        for name, parser in _parser_choices().items():
+            real = set()
+            for a in parser._actions:
+                real |= set(a.option_strings)
+            real -= {"-h", "--help"}
+            block = blocks.get(name)
+            self.assertIsNotNone(block, f"补全文件没有 {name} 的分支")
+            cited = {t for t in block if t.startswith("-")}
+            self.assertEqual(real - cited, set(),
+                             f"补全文件漏了 {name} 的这些参数")
+            self.assertEqual(cited - real, set(),
+                             f"补全文件给 {name} 列出了不存在的参数")
 
     def test_version_is_a_plain_semver(self):
         import re
@@ -1672,6 +1733,115 @@ class TestStationsParser(unittest.TestCase):
                            "<!-- SYNC:END -->\n")
         self.assertFalse(rows[0]["enabled"])
         self.assertEqual(rows[0]["models"], ["m"])
+
+
+class TestReportHtml(unittest.TestCase):
+    """逐轮数据被压成几个百分比, 信息全丢了。
+
+    排查时需要的是"这周第几轮开始烂、烂成什么样" —— 一张离线可看的图,
+    比 5 行百分比直观得多。而且它必须是**自包含**的: 中转站面板经常开在
+    断网的机器上, 引用任何 CDN 都等于打不开。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k)
+                       for k in ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".lock")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _round(self, ts, rows, partial=False):
+        payload = {"time": f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]}",
+                   "summary": {}, "results": rows, "partial": partial}
+        with open(os.path.join(synapse.REPORTS, f"check-{ts}.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def _ok(self, t, m, lat=1000):
+        return {"target": t, "model": m, "kind": "ok", "http": 200,
+                "latency_ms": lat, "snippet": "fine", "test": "basic"}
+
+    def _bad(self, t, m, kind="timeout"):
+        return {"target": t, "model": m, "kind": kind, "http": 0,
+                "latency_ms": 0, "snippet": "", "test": "basic"}
+
+    def _out_path(self):
+        return os.path.join(self.tmp, "dashboard.html")
+
+    def test_writes_self_contained_html(self):
+        """仪表盘必须离线可看: 不许引用任何外部脚本/样式/字体/图片。"""
+        self._round("20261020-100000", [self._ok("alpha", "m1", 900)])
+        self._round("20261020-110000", [self._bad("alpha", "m1", "timeout")])
+        rc = synapse.main(["report", "--days", "0", "--out", self._out_path()],
+                          out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        with open(self._out_path(), encoding="utf-8") as f:
+            html = f.read()
+        self.assertIn("<!DOCTYPE html>", html)
+        self.assertIn("alpha", html)
+        # 自包含: 没有外部资源引用(SVG 的 xmlns 是命名空间, 不算引用)
+        for bad in ('<script src', '<link rel="stylesheet"', '@import', 'url(http',
+                    'fonts.googleapis', 'cdn.'):
+            self.assertNotIn(bad, html, "仪表盘引用了外部资源, 断网就是白屏")
+
+    def test_heatmap_shows_each_round_kind(self):
+        """每一轮的成败都要在热力图里有一格 —— 这是它比百分比多出来的信息。"""
+        self._round("20261020-100000", [self._ok("alpha", "m1")])
+        self._round("20261020-110000", [self._bad("alpha", "m1", "timeout")])
+        synapse.main(["report", "--days", "0", "--out", self._out_path()],
+                     out=self.out, err=self.err)
+        with open(self._out_path(), encoding="utf-8") as f:
+            html = f.read()
+        self.assertIn('class="cell k-ok" data-kind="ok"', html)
+        self.assertIn('class="cell k-dead" data-kind="timeout"', html)
+
+    def test_json_payload_is_pure_json(self):
+        """脚本用户不能被落下: --json 时 stdout 只有 JSON, 人话走 stderr。"""
+        self._round("20261020-100000", [self._ok("alpha", "m1")])
+        rc = synapse.main(["report", "--days", "0", "--out", self._out_path(), "--json"],
+                          out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        payload = json.loads(self.out.getvalue())
+        for k in ("path", "days", "rounds", "reports_used", "unreadable_reports",
+                  "stations", "targets", "ok_rate"):
+            self.assertIn(k, payload)
+        self.assertEqual(payload["rounds"], 1)
+
+    def test_empty_history_still_renders_with_hint(self):
+        """没有历史不是错误, 但必须说清"去跑什么", 而不是给一张空图让人猜。"""
+        rc = synapse.main(["report", "--days", "0", "--out", self._out_path()],
+                          out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        with open(self._out_path(), encoding="utf-8") as f:
+            html = f.read()
+        self.assertIn("还没有", html)
+        self.assertIn("check", html)
+
+    def test_default_output_path_is_reports_dashboard(self):
+        synapse.main(["report", "--days", "0"], out=self.out, err=self.err)
+        self.assertTrue(os.path.exists(os.path.join(synapse.REPORTS, "dashboard.html")))
+
+    def test_user_supplied_names_are_escaped(self):
+        """站名/模型名来自配置文件, 里面可能有尖括号; 不转义就是自伤式 XSS。"""
+        self._round("20261020-100000", [self._ok("a<b>", "m&1")])
+        synapse.main(["report", "--days", "0", "--out", self._out_path()],
+                     out=self.out, err=self.err)
+        with open(self._out_path(), encoding="utf-8") as f:
+            html = f.read()
+        self.assertNotIn("a<b>", html)
+        self.assertIn("a&lt;b&gt;", html)
 
 
 if __name__ == "__main__":

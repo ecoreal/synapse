@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.11.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.12.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -70,6 +70,19 @@ Python 版本。
 internal_error(Synapse 自己的 bug, 不是站的问题)、config_error(配置没写全)。
 \-\-json 时输出 {days, window, reports_used, targets:[...], summary}。
 .TP
+.B report
+生成一张\fB单文件离线\fR体检仪表盘(HTML)。数据来自 reports/ 里的历史报告,
+图表全部用内联 SVG 画, \fB不引用任何外部脚本/样式/字体/图片\fR ——
+中转站面板常开在断网机器或内网跳板机上, 引用 CDN 等于白屏。
+内容: 总体指标卡、站级记分卡(成功率条 + 判定)、可用性时间线热力图
+(每格一轮, 悬停看当轮判定与延迟)、失败原因分布、延迟趋势 sparkline、
+未解决问题清单。
+\-\-days N 窗口(默认 7, 0 = 全部); \-o/\-\-out 输出路径
+(默认 reports/dashboard.html); \-\-json 输出 {path, rounds, reports_used,
+ok_rate, stations, targets, bytes, ...}。
+原子写入(临时文件 + rename), 中途失败不会留下半张网页。
+不参与 prune 的清理候选(文件名不匹配 check\-/diagnose\- 前缀)。
+.TP
 .B prune
 回收历史报告(默认只预览, 加 \-\-apply 才真删)。
 reports/ 每轮体检落一个文件, 不设上限会无限增长。
@@ -107,6 +120,9 @@ sync-stations 生成的目标清单。以原子方式写入(临时文件 + fsync
 .TP
 .I ~/.config/synapse/.targets_snapshot.json
 上次体检的目标清单快照, 用于提醒"清单有变更未复查"。
+.TP
+.I ~/.config/synapse/reports/dashboard.html
+由 report 生成的单文件离线仪表盘(生成物, 可随时删除重建)。
 
 .SH 坏数据的处理规则
 监控工具不能因为数据坏就瘫掉, 也不能装作没发生。三类文件区别对待:

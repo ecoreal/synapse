@@ -12,7 +12,7 @@ test:                    ## 跑回归测试(不联网, 含资源泄漏检查)
 	$(PY) -W error::ResourceWarning -m unittest discover -s tests -v
 
 check:                   ## 语法 + 编译 + 测试, 提交前跑这个
-	$(PY) -m compileall -q synapse.py synapse_classify.py synapse_probe.py tests >/dev/null
+	$(PY) -m compileall -q synapse.py synapse_classify.py synapse_probe.py synapse_dashboard.py tests >/dev/null
 	$(PY) -W error::ResourceWarning -m unittest discover -s tests
 
 smoke:                   ## 用临时数据目录跑一遍真实 CLI(不碰你的配置)

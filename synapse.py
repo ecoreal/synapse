@@ -35,12 +35,13 @@ from synapse_classify import (WAF_MARKERS, NO_CHANNEL_MARKERS, VERDICT,  # noqa:
 from synapse_probe import (PROBE_TEXT, CTX, CACHE_PAD, CACHE_Q1, CACHE_Q2,  # noqa: F401
                           TEST_LABELS, NET_ERRORS, _net_or_internal,  # noqa: F401
                           probe, probe_multi, probe_cache, build_plan, run_plan)
+from synapse_dashboard import render_dashboard
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.11.0"
+__version__ = "1.12.0"
 
 
 def _init_home():
@@ -1336,6 +1337,113 @@ def cmd_uptime(args, ctx):
     return 0
 
 
+def _history_rounds(days=7.0):
+    """按时间正序返回**全量**体检的逐轮明细, 供仪表盘画热力图。
+
+    只用全量轮: partial 定点体检只覆盖一部分目标, 混进同一条时间线会留下空白格,
+    看起来像"那轮整体挂了" —— 那是最容易被误读的一种假信号。
+    """
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days) if days > 0 else None
+    rounds = []
+    for ts, path in reversed(_report_entries("check")):   # 新的在前 → 反过来变正序
+        if cutoff is not None and ts < cutoff:
+            continue
+        try:
+            d = load_json(path, {}) or {}
+        except (ValueError, OSError):
+            continue                       # 坏报告在 _uptime_stats 里已计数, 这里不重复报
+        if not isinstance(d, dict) or d.get("partial"):
+            continue
+        rows_in = d.get("results")
+        if not isinstance(rows_in, list):
+            continue
+        cells, ok, total = {}, 0, 0
+        for r in rows_in:
+            if not isinstance(r, dict):
+                continue
+            if r.get("test") not in (None, "basic"):
+                continue
+            t, m = r.get("target") or "?", r.get("model") or "?"
+            kind = r.get("kind") or "?"
+            cells[(t, m)] = (kind, r.get("latency_ms") or 0)
+            if kind in ("internal_error", "config_error"):
+                continue                   # 不是站的账, 不进每轮成功率
+            total += 1
+            if kind in _OK_KINDS:
+                ok += 1
+        rounds.append({"label": ts.strftime("%m-%d %H:%M"), "cells": cells,
+                       "ok": ok, "total": total})
+    return rounds
+
+
+def cmd_report(args, ctx):
+    """生成单文件离线体检仪表盘。写了什么、写到哪, 都要能说清楚。"""
+    days = args.days
+    rows, used, bad = _uptime_stats(days)
+    stations = _uptime_by_station(rows)
+    rounds = _history_rounds(days)
+    try:
+        db = load_issues()
+    except SynapseExit:
+        db = {"issues": []}
+    open_is = [i for i in db["issues"] if i.get("status") in ("open", "doing")]
+
+    samples = sum(r["samples"] for r in rows)
+    oks = sum(r["oks"] for r in rows)
+    rate = (oks / samples) if samples else 0.0
+
+    # 延迟序列: 按轮次顺序取每格的成功延迟, 0/None 留空(不补 0, 否则画出假谷底)
+    serie = {}
+    for rd in rounds:
+        for (t, m), (_kind, lat) in rd["cells"].items():
+            if lat:
+                serie.setdefault((t, m), []).append(lat)
+    for r in rows:
+        r["serie"] = serie.get((r["target"], r["model"]), [])
+
+    window = f"最近 {days:g} 天" if days > 0 else "全部历史"
+    payload = {
+        "version": __version__, "generated": now(), "cmd": CMD,
+        "days": days, "window": window,
+        "reports_used": used, "unreadable_reports": bad,
+        "ok_rate": round(rate, 4),
+        "totals": {"samples": samples, "ok": oks, "fails": samples - oks},
+        "worst_streak": max([r["longest_streak"] for r in stations], default=0),
+        "internal_errors": sum(r["internal_errors"] for r in rows),
+        "stations": stations, "targets": rows, "rounds": rounds,
+        "issues": [{"id": i.get("id"), "status": i.get("status"),
+                    "target": i.get("target") or "", "model": i.get("model") or "",
+                    "symptom": i.get("symptom") or "", "kind": i.get("kind") or ""}
+                   for i in open_is],
+    }
+    path = args.out or os.path.join(REPORTS, "dashboard.html")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(render_dashboard(payload))
+        os.replace(tmp, path)              # 原子替换: 中途失败不会留下半张网页
+    except OSError as e:
+        ctx.die(f"[!] 写仪表盘失败: {path}: {e}")
+
+    if ctx.as_json:
+        ctx.json({"path": path, "days": days, "window": window, "rounds": len(rounds),
+                  "reports_used": used, "unreadable_reports": bad,
+                  "ok_rate": payload["ok_rate"], "stations": len(stations),
+                  "targets": len(rows), "issues": len(open_is),
+                  "internal_errors": payload["internal_errors"],
+                  "bytes": os.path.getsize(path)})
+        return 0
+    size = os.path.getsize(path) / 1024
+    ctx.say(f"[完成] 仪表盘已生成: {path}  ({size:.1f} KB, 单文件离线可看)")
+    ctx.say(f"  窗口 {window} / {used} 份全量报告 / {len(stations)} 个站 / "
+            f"{len(rows)} 个模型" + (f" / {bad} 份报告损坏(已跳过)" if bad else ""))
+    if not rounds:
+        ctx.say(f"  (还没有逐轮记录, 图是空的) 先跑一次全量体检: {CMD} check")
+    ctx.say(f"  用浏览器打开: file://{os.path.abspath(path)}")
+    return 0
+
+
 def cmd_prune(args, ctx):
     """回收历史报告。默认只预览 —— 删东西一律要 --apply, 与 fix 同规矩。
 
@@ -1801,8 +1909,9 @@ def issue_add_auto(db, target, model, kind, symptom, cause="", plan="", ts=None,
                          "notes": [], "auto": True})
     return n, True
 
-def main(argv=None, out=None, err=None):
-    """返回退出码（不再 sys.exit），输出流可注入 → CLI 可端到端测试。"""
+def build_parser():
+    """构建 argparse。单独抽出来是为了让测试能内省"真实存在的子命令/参数",
+    而不是去正则匹配源码文本 —— 后者只是另一种会漂的镜像。"""
     ap = argparse.ArgumentParser(description="Synapse — pi 模型连通性监控/诊断")
     ap.add_argument("--version", action="version",
                     version=f"synapse {__version__}",
@@ -1916,6 +2025,12 @@ def main(argv=None, out=None, err=None):
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(fn=cmd_uptime)
 
+    p = sub.add_parser("report", help="生成单文件离线体检仪表盘(HTML, 内联 SVG, 无外部资源)")
+    p.add_argument("--days", type=float, default=7.0, help="统计窗口天数(默认 7, 0=全部)")
+    p.add_argument("-o", "--out", help="输出路径(默认 reports/dashboard.html)")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.set_defaults(fn=cmd_report)
+
     p = sub.add_parser("prune", help="清理历史报告(默认只预览, --apply 才真删)")
     p.add_argument("--keep", type=int, default=200,
                    help="每个前缀(如 check-/diagnose-)保留最新多少个(默认 200)")
@@ -1938,7 +2053,12 @@ def main(argv=None, out=None, err=None):
     p.add_argument("--days", type=float, default=7.0,
                    help="长期稳定性统计窗口天数(默认 7, 0=全部)")
     p.set_defaults(fn=cmd_status)
+    return ap
 
+
+def main(argv=None, out=None, err=None):
+    """返回退出码（不再 sys.exit），输出流可注入 → CLI 可端到端测试。"""
+    ap = build_parser()
     ctx = Ctx(out, err)
     try:
         args = ap.parse_args(argv)        # --version/--help 在这里抛 SystemExit

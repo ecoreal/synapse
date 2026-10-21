@@ -21,7 +21,7 @@ jobs:
           python-version: ${{ matrix.python }}
       # 项目承诺零第三方依赖 —— 这里刻意不装任何东西, 装了就说明承诺破了
       - name: 语法编译
-        run: python -m compileall -q synapse.py synapse_classify.py synapse_probe.py tests
+        run: python -m compileall -q synapse.py synapse_classify.py synapse_probe.py synapse_dashboard.py tests
       - name: 回归测试
         run: python -W error::ResourceWarning -m unittest discover -s tests -v
       - name: CLI 冒烟(临时数据目录, 不碰真实配置)
@@ -63,7 +63,7 @@ jobs:
       - name: 模块齐全(拆成三层后容易漏打)
         run: |
           deb=$(ls dist/*.deb)
-          for m in synapse.py synapse_classify.py synapse_probe.py; do
+          for m in synapse.py synapse_classify.py synapse_probe.py synapse_dashboard.py; do
             dpkg-deb -c "$deb" | grep -q "usr/lib/synapse/$m" || {
               echo "[!] 包里少了 $m" >&2; exit 1; }
           done

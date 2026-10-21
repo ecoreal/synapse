@@ -19,9 +19,10 @@ install -m644 packaging-src/DEBIAN/control packaging/DEBIAN/control
 install -m755 packaging-src/DEBIAN/postinst packaging/DEBIAN/postinst
 
 # 1) 程序 -> /usr/lib/synapse
-#    synapse.py 是入口(CLI/状态/台账), synapse_classify.py 判定层, synapse_probe.py 探测层。
-#    三者平铺在同一目录, 因为运行时靠 sys.path[0](脚本所在目录)互相 import。
-for f in synapse.py synapse_classify.py synapse_probe.py; do
+#    synapse.py 入口(CLI/状态/台账), synapse_classify.py 判定层,
+#    synapse_probe.py 探测层, synapse_dashboard.py 渲染层(纯函数, 数据→HTML)。
+#    四个模块平铺在同一目录, 因为运行时靠 sys.path[0](脚本所在目录)互相 import。
+for f in synapse.py synapse_classify.py synapse_probe.py synapse_dashboard.py; do
     install -Dm644 "$f" "$U/lib/synapse/$f"
 done
 
