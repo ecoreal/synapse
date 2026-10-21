@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.17.0"
+__version__ = "1.18.0"
 
 
 def _init_home():
@@ -1236,7 +1236,8 @@ def _uptime_stats(days=7.0, target=None, model=None):
             kind = r.get("kind") or "?"
             a = acc.setdefault((t, m), {"samples": 0, "oks": 0, "kinds": {},
                                         "lat": [], "streak": 0, "longest": 0,
-                                        "last_kind": kind, "internal": 0, "cfg": 0})
+                                        "last_kind": kind, "internal": 0, "cfg": 0,
+                                        "since": None, "last_ok": None})
             a["last_kind"] = kind
             if kind == "internal_error":
                 a["internal"] += 1
@@ -1248,10 +1249,14 @@ def _uptime_stats(days=7.0, target=None, model=None):
             if kind in _OK_KINDS:
                 a["oks"] += 1
                 a["streak"] = 0
+                a["since"] = None          # 恢复了: 连败起点作废
+                a["last_ok"] = _ts
                 if r.get("latency_ms"):
                     a["lat"].append(r["latency_ms"])
             else:
                 a["kinds"][kind] = a["kinds"].get(kind, 0) + 1
+                if a["streak"] == 0:
+                    a["since"] = _ts       # 从"哪一轮开始"坏 —— 决定等还是换
                 a["streak"] += 1
                 a["longest"] = max(a["longest"], a["streak"])
 
@@ -1263,8 +1268,11 @@ def _uptime_stats(days=7.0, target=None, model=None):
         lat = sorted(a["lat"])
         rows.append({
             "target": t, "model": m, "samples": n, "oks": a["oks"], "fails": n - a["oks"],
-            "ok_rate": round(rate, 4), "longest_streak": a["longest"],
+            "ok_rate": round(rate, 4), "streak": a["streak"],
+            "longest_streak": a["longest"],
             "last_kind": a["last_kind"],
+            "since": a["since"].strftime("%Y-%m-%d %H:%M") if a["since"] else None,
+            "last_ok": a["last_ok"].strftime("%Y-%m-%d %H:%M") if a["last_ok"] else None,
             "p50_latency_ms": lat[len(lat) // 2] if lat else None,
             "avg_latency_ms": int(sum(lat) / len(lat)) if lat else None,
             "reasons": [{"kind": k, "count": c} for k, c in
@@ -1356,6 +1364,113 @@ def _cap_ok(kind):
     """能力测试的"通过"判定。ok_truncated 是模型自己话痨, 不影响能力。"""
     return kind in ("ok", "ok_truncated", "ok_tool_use", "cache_passthrough",
                     "ok_nonjson")
+
+
+def _ago_cn(hours):
+    """人话时长。数字后面必须跟单位 —— "17" 是看不出是轮还是小时的。"""
+    if hours < 1:
+        return f"{int(hours * 60)} 分钟"
+    if hours < 48:
+        return f"{hours:.0f} 小时"
+    return f"{hours / 24:.1f} 天"
+
+
+def cmd_timeline(args, ctx):
+    """每个目标/模型: 从哪一轮开始坏的, 坏了多久, 上次还行是什么时候。
+
+    "连败 17" 和 "连败 17 轮、已经 3 天没通过"是两种不同的决定:
+    前者可以再等等, 后者今天就该换站。只报次数等于把这个判断藏起来。
+    """
+    days = args.days
+    target = getattr(args, "target", None)
+    window = f"最近 {days:g} 天" if days > 0 else "全部历史"
+    rows, used, bad = _uptime_stats(days, target=target)
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)) if days > 0 else None
+    stamps = [e[0] for e in _report_entries("check") if cutoff is None or e[0] >= cutoff]
+    last_ts = max(stamps) if stamps else None
+
+    failing, recovered = [], []
+    for r in rows:
+        item = dict(r)
+        item["verdict"], item["advice"] = _uptime_verdict(r["samples"], r["ok_rate"])
+        if r["samples"] == 0:
+            continue                       # 全是 internal/config 错误: 无可判定
+        if r["last_kind"] in _OK_KINDS:
+            recovered.append(item)
+            continue
+        hours = 0.0
+        if last_ts and r["since"]:
+            try:
+                since = datetime.datetime.strptime(r["since"], "%Y-%m-%d %H:%M")
+                hours = max(0.0, (last_ts - since).total_seconds() / 3600)
+            except ValueError:
+                hours = 0.0
+        item["hours"] = round(hours, 2)
+        item["duration"] = _ago_cn(hours)
+        failing.append(item)
+
+    # 坏得最久的排最前 —— 那才是今晚该处理的
+    failing.sort(key=lambda x: (-x["streak"], -x["hours"]))
+    recovered.sort(key=lambda x: x["last_ok"] or "", reverse=True)
+    top = getattr(args, "top", 20)
+
+    if ctx.as_json:
+        ctx.json({"days": days, "window": window, "reports_used": used,
+                  "unreadable_reports": bad,
+                  "last_report": last_ts.strftime("%Y-%m-%d %H:%M") if last_ts else None,
+                  "failing": [{k: v for k, v in r.items()
+                               if k in ("target", "model", "streak", "since",
+                                        "hours", "duration", "last_ok", "ok_rate",
+                                        "samples", "verdict", "reasons")}
+                              for r in failing[:top]],
+                  "recovered": [{k: v for k, v in r.items()
+                                 if k in ("target", "model", "last_ok", "ok_rate",
+                                          "samples", "verdict")}
+                                for r in recovered[:top]],
+                  "summary": {"failing": len(failing), "recovered": len(recovered),
+                              "reports_used": used, "unreadable_reports": bad}})
+        return 0
+
+    if bad:
+        ctx.say(f"[!] {bad} 份报告无法读取(已跳过)")
+    if not rows:
+        ctx.say(f"[i] {window}里还没有可用的全量体检报告(共 {used} 份)")
+        ctx.say(f"    先跑一次全量体检: {CMD} check")
+        return 0
+
+    ctx.say(f"\n=== 时间线  {window} / {used} 份全量报告 ===")
+    if last_ts:
+        ctx.say(f"    最后一次体检: {last_ts:%Y-%m-%d %H:%M}")
+    if failing:
+        ctx.say("\n正在失败(坏得最久的在最前):")
+        ctx.say(f"  {'目标/模型':<34} {'连败':>4} {'已持续':>9}  起点")
+        for r in failing[:top]:
+            name = f"{r['target']}/{r['model']}"
+            ctx.say(f"  {name[:34]:<34} {r['streak']:>4} {r['duration']:>9}  "
+                    f"{r['since'] or '-'}")
+            if r["reasons"]:
+                why = ", ".join(f"{x['kind']}×{x['count']}" for x in r["reasons"])
+                ctx.say(f"  {'':<34} └ 主要失败: {why}")
+        worst = failing[0]
+        if worst["streak"] >= 5 and worst["hours"] >= 12:
+            ctx.say(f"\n[!] {worst['target']}/{worst['model']} 已经 "
+                    f"{worst['duration']} 没通过 —— 这不是抖动, 换站吧: "
+                    f"{CMD} best")
+        elif worst["streak"] >= 5:
+            ctx.say(f"\n(i) {worst['target']}/{worst['model']} 连败 "
+                    f"{worst['streak']} 轮但只有 {worst['duration']}, 可能还在抖动, "
+                    f"再观察一两轮")
+    else:
+        ctx.say("\n没有正在失败的目标。")
+
+    if recovered:
+        ctx.say(f"\n当前通过({len(recovered)} 项; 通过 ≠ 长期稳, 看最后那个判定):")
+        for r in recovered[:top]:
+            ctx.say(f"  {r['target']}/{r['model']}: 最近一次成功 {r['last_ok'] or '-'}, "
+                    f"{r['ok_rate'] * 100:.0f}% / {r['samples']} 次, {r['verdict']}")
+    ctx.say(f"\n(i) 时间线只认全量体检(check); 定向体检(diagnose)不参与, "
+            f"否则「出问题才去查」会把时间线拉歪")
+    return 0
 
 
 def cmd_best(args, ctx):
@@ -2386,6 +2501,13 @@ def build_parser():
                    help="按站汇总(用户选的是站, 不是模型)")
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(fn=cmd_uptime)
+
+    p = sub.add_parser("timeline", help="坏了多久了(连败起点/持续时长/上次什么时候还行)")
+    p.add_argument("--days", type=float, default=7.0, help="统计窗口(默认 7, 0 = 全部)")
+    p.add_argument("--target", help="只看某个目标")
+    p.add_argument("--top", type=int, default=20, help="最多列几行(默认 20)")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.set_defaults(fn=cmd_timeline)
 
     p = sub.add_parser("best", help="该用哪个站/模型(有证据的推荐, 样本不足就直说)")
     p.add_argument("--days", type=float, default=7.0, help="统计窗口(默认 7, 0 = 全部)")

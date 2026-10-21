@@ -1,3 +1,16 @@
+synapse (1.18.0) unstable; urgency=medium
+
+  * 新增 timeline: 坏了多久了(连败起点/持续时长/上次通过时间)
+    - "连败 17 轮"与"连败 17 轮、已 2 天没通过"是两种决定; 只报次数等于藏起判断
+    - 正在失败的按坏得最久排序; ≥5 轮且 ≥12 小时直接建议换站, 否则提示再观察
+    - 已通过的列"当前通过"(通过 ≠ 长期稳, 判定列照给)
+    - 只认全量体检(check), 定向体检不参与
+    - --json: failing/recovered/last_report/summary
+  * _uptime_stats 增加 since/last_ok/streak 字段(供 timeline 与 --json 使用)
+  * 测试 170 -> 175 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 22:45:00 +0800
+
 synapse (1.17.0) unstable; urgency=medium
 
   * best: 把推荐和 config 里的默认站对账

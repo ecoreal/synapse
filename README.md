@@ -21,6 +21,22 @@ pi 模型中转站的连通性监控 / 诊断 / 配置修复工具。
 > 源码目录里若还有旧数据文件，首次运行会自动复制迁移过去，原文件保留。
 > 装 Debian 包后命令就是 `synapse`（不再需要 `python3 synapse.py`）。
 
+### 坏了多久了: `synapse timeline`
+
+"连败 17 轮"和"连败 17 轮、已经 2 天没通过"是两种不同的决定。`timeline` 给出每个目标/模型的连败起点、已持续时长、上次通过时间：
+
+```
+正在失败(坏得最久的在最前):
+  hyb/deepseek-v4.1-flash              17     2.0 天  2026-10-19 17:11
+                                     └ 主要失败: server_error×12, auth_failed×4
+  bxacc/deepseek-v4.1-flash            13     2.0 天  2026-10-19 17:11
+                                     └ 主要失败: timeout×12, auth_failed×1
+
+[!] hyb/deepseek-v4.1-flash 已经 2.0 天 没通过 —— 这不是抖动, 换站吧: synapse best
+```
+
+连败 ≥5 轮且持续 ≥12 小时才说"换站吧"，否则提示"可能还在抖动"。已经通过的单独列"当前通过"——通过 ≠ 长期稳。只认全量体检，定向体检不参与（否则"出问题才去查"会把时间线拉歪）。
+
 ### 该用哪个: `synapse best`
 
 监控的终点是决策。`best` 拿已有证据回答"该把哪个站/模型放进 pi"，并且在证据不足时拒绝回答：
@@ -305,7 +321,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 170 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 175 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

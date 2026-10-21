@@ -1909,6 +1909,90 @@ class TestReportHtml(unittest.TestCase):
         self.assertNotIn("a<b>", html)
         self.assertIn("a&lt;b&gt;", html)
 
+class TestTimeline(unittest.TestCase):
+    """半夜被叫醒的人要知道的不是"连败 17", 而是"坏了多久了"。
+
+    连败 5 轮(30 分钟)和连败 5 轮(3 天)是两种完全不同的决定:
+    前者等一等, 后者立刻换站。只报次数等于把这个判断藏起来。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k)
+                       for k in ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".lock")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _round(self, ts, rows):
+        payload = {"time": f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}:{ts[13:15]}",
+                   "summary": {}, "results": rows, "partial": False}
+        with open(os.path.join(synapse.REPORTS, f"check-{ts}.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+
+    def _row(self, t, m, kind, test="basic"):
+        return {"target": t, "model": m, "kind": kind, "http": 200,
+                "latency_ms": 500, "snippet": "", "test": test}
+
+    def test_says_since_when_a_target_has_been_failing(self):
+        """连败是从哪一轮开始的 —— 这个时间点决定了"等一等"还是"立刻换"。"""
+        for i in range(4):
+            self._round(f"2026102{i}-100000", [self._row("t1", "m1", "ok")])
+        for i in range(3):
+            self._round(f"2026102{i + 4}-100000", [self._row("t1", "m1", "timeout")])
+        synapse.main(["timeline", "--days", "0"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("t1/m1", text)
+        self.assertIn("2026-10-24 10:00", text)      # 连败起点
+        self.assertIn("2.0 天", text)                # 从连败起点到最后一轮报告
+
+    def test_recovered_target_is_not_listed_as_failing(self):
+        for i in range(3):
+            self._round(f"2026102{i}-100000", [self._row("t1", "m1", "timeout")])
+        for i in range(2):
+            self._round(f"2026102{i + 3}-100000", [self._row("t1", "m1", "ok")])
+        synapse.main(["timeline", "--days", "0"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("当前通过", text)
+        self.assertNotIn("正在失败(", text)
+
+    def test_json_carries_since_and_duration(self):
+        for i in range(3):
+            self._round(f"2026102{i}-100000", [self._row("t1", "m1", "timeout")])
+        synapse.main(["timeline", "--days", "0", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        row = d["failing"][0]
+        self.assertEqual(row["target"], "t1")
+        self.assertTrue(row["since"].startswith("2026-10-20"))
+        self.assertGreater(row["hours"], 0)
+        self.assertEqual(row["streak"], 3)
+
+    def test_target_filter(self):
+        self._round("20261020-100000", [self._row("t1", "m1", "timeout"),
+                                        self._row("t2", "m1", "timeout")])
+        synapse.main(["timeline", "--days", "0", "--target", "t1"],
+                     out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("t1/m1", text)
+        self.assertNotIn("t2/m1", text)
+
+    def test_empty_history_says_so(self):
+        rc = synapse.main(["timeline", "--days", "0"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0, self.err.getvalue())
+        self.assertIn("还没有", self.out.getvalue())
+
 
 class TestBest(unittest.TestCase):
     """监控的终点是决策: "我该把哪个站/模型放进 pi"。

@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.17.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.18.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -82,6 +82,28 @@ Python 版本。
 internal_error(Synapse 自己的 bug, 不是站的问题)、config_error(配置没写全)。
 \-\-json 时输出 {days, window, reports_used, targets:[...], summary}。
 .TP
+.B timeline
+"坏了多久了"。\fBtimeline\fR 对每个 目标/模型 给出: 当前连败几轮、
+\fB从哪一轮开始\fR、已经持续多久、上次通过是什么时候。
+.PP
+"连败 17 轮"和"连败 17 轮、已经 2 天没通过"是两种不同的决定: 前者可以再等等,
+后者今天就该换站。只报次数等于把这个判断藏起来。
+.IP \(bu 2
+正在失败的按"坏得最久"排序 —— 那才是今晚该处理的
+.IP \(bu 2
+连败 ≥5 轮且已持续 ≥12 小时, 直接给出"这不是抖动, 换站吧"并指向 \fBbest\fR;
+不到这个量级则提示"可能还在抖动, 再观察一两轮"
+.IP \(bu 2
+已经通过的目标单列为"当前通过" —— 并通过 ≠ 长期稳, 判定列仍然给出
+.IP \(bu 2
+只认全量体检(check)。定向体检(diagnose)不参与, 否则"出问题才去查"会把时间线拉歪
+.IP \(bu 2
+\fB\-\-json\fR 输出 {failing:[{target,model,streak,since,hours,duration,
+last\_ok,ok\_rate,verdict}], recovered:[...], last\_report, summary}
+.PP
+真实数据上它一眼说清: hyb/deepseek-v4.1-flash 连败 17 轮、已持续 2.0 天,
+而 tierflow 两个模型 100% —— 该换哪个不用猜。
+
 .B best
 监控的终点是决策: 该把哪个站/模型放进 pi。\fBbest\fR 用已有证据回答,
 并且拒绝在没有证据时回答:
