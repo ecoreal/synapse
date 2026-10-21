@@ -91,6 +91,10 @@ python3 synapse.py check --json | jq '.summary'
 python3 synapse.py status
 python3 synapse.py status --json          # 机读版
 
+# 机器可读输出不止 check: 脚本要能问"这站到底怎么了"、"台账里有什么"
+python3 synapse.py diagnose --target hyb --model z-ai/glm-5.3 --json | jq '.conclusions'
+python3 synapse.py issue list --json | jq '.open'
+
 # 只查某个目标 / 某个模型
 python3 synapse.py check --target hyb --model z-ai/glm-5.3 -v
 
@@ -153,6 +157,7 @@ python3 synapse.py issue list [--status open]
 | ✅ 正常 / 正常(截断) | 链路可用 | 无需处理 |
 | ❌ 鉴权失败 | key 无效或欠费 | 换 key / 充值 |
 | ❌ 配置不完整 | `config.json` 缺 `base_url`/`api_key`（或 `key_from_pi` 指向的 provider 不存在） | 补全该目标字段，或跑 `import-from-pi` 重新生成。**注意：这类站会显式报错，不会静默跳过** |
+| 🐞 Synapse 内部错误 | **不是站的问题**，是本程序的 bug（异常分诊把网络故障和自身 bug 分开了） | 带着这一行提 issue；它不进连续失败计数，但整轮仍按异常返回 1 |
 | ❌ 无可用渠道 | 模型名不对或该分组没这个模型 | 核对站内模型 ID（`[1M]` 后缀只是客户端标记，不会发出去） |
 | ❌ 渠道不支持 thinking 参数 | 发 `thinking` 即 400（pi 里最常见的 `400 upstream_error`） | `fix --fix disable-reasoning --apply` |
 | ❌ 请求被拒(400) | 渠道不认这个参数/字段 | `diagnose` 看细节 |
@@ -214,7 +219,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 48 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 67 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

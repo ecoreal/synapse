@@ -8,6 +8,7 @@
 import os
 import sys
 import unittest
+import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import synapse  # noqa: E402
@@ -323,6 +324,229 @@ class TestTargetsOf(unittest.TestCase):
         self.assertTrue(synapse.read_dirty())
 
 
+class TestDocsConsistency(unittest.TestCase):
+    """文档里的版本号必须和代码一致。
+
+    之前 man page 一直写着 "synapse 1.0.0"(发到 1.4.0 都没人发现),
+    因为它没有任何地方被校验。现在这条是硬性断言。
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _read(self, rel):
+        with open(os.path.join(self.ROOT, rel), encoding="utf-8") as f:
+            return f.read()
+
+    def test_man_page_version_matches(self):
+        self.assertIn(f"synapse {synapse.__version__}", self._read("man/synapse.1"),
+                      "man/synapse.1 的版本号没跟上 __version__")
+
+    def test_debian_control_version_matches(self):
+        self.assertIn(f"Version: {synapse.__version__}",
+                      self._read("packaging-src/DEBIAN/control"))
+
+    def test_changelog_top_entry_matches(self):
+        first = self._read("debian-doc/changelog.Debian").split("\n", 1)[0]
+        self.assertIn(f"({synapse.__version__})", first,
+                      "changelog 最新一条不是当前版本")
+
+    def test_version_is_a_plain_semver(self):
+        import re
+        self.assertRegex(synapse.__version__, r"^\d+\.\d+\.\d+$")
+
+
+class TestErrorTriage(unittest.TestCase):
+    """网络异常 vs 我们自己的 bug —— 必须分开报。
+
+    旧实现把 probe 里所有异常一律当 conn_error: 我们自己的 KeyError/TypeError
+    会被报告成"站连不上", 用户就去追一个根本健康的站。这是最坏的一种假阳性。
+    """
+
+    def test_network_error_is_conn_error(self):
+        kind, snip = synapse._net_or_internal(urllib.error.URLError("boom"))
+        self.assertEqual(kind, "conn_error")
+        self.assertIn("URLError", snip)
+
+    def test_timeout_is_timeout(self):
+        kind, _ = synapse._net_or_internal(TimeoutError("timed out"))
+        self.assertEqual(kind, "timeout")
+
+    def test_oserror_is_conn_error(self):
+        kind, _ = synapse._net_or_internal(ConnectionResetError("reset"))
+        self.assertEqual(kind, "conn_error")
+
+    def test_our_own_bug_is_internal_error_not_conn_error(self):
+        """KeyError/TypeError 是我们的 bug, 不能伪装成站方故障。"""
+        for exc in (KeyError("content"), TypeError("bad"), AttributeError("nope")):
+            kind, snip = synapse._net_or_internal(exc)
+            self.assertEqual(kind, "internal_error", f"{type(exc).__name__} 被误判")
+            self.assertIn(type(exc).__name__, snip)
+
+    def test_internal_error_has_a_loud_verdict(self):
+        self.assertIn("internal_error", synapse.VERDICT)
+        self.assertIn("bug", synapse.VERDICT["internal_error"].lower())
+
+    def test_probe_maps_unexpected_exception_to_internal_error(self):
+        orig = synapse.urllib.request.urlopen
+        synapse.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        try:
+            r = synapse.probe("https://a.invalid", "sk-1", "m", timeout=1)
+        finally:
+            synapse.urllib.request.urlopen = orig
+        self.assertEqual(r["kind"], "internal_error")
+
+    def test_probe_still_maps_network_exception_to_conn_error(self):
+        orig = synapse.urllib.request.urlopen
+        synapse.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(
+            urllib.error.URLError("dns fail"))
+        try:
+            r = synapse.probe("https://a.invalid", "sk-1", "m", timeout=1)
+        finally:
+            synapse.urllib.request.urlopen = orig
+        self.assertEqual(r["kind"], "conn_error")
+
+    def test_run_plan_does_not_disguise_bug_as_station_fault(self):
+        """run_plan 里任何一项探针炸了, 也不能一律算站挂了。"""
+        orig = synapse.probe
+        synapse.probe = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kaboom"))
+        try:
+            out = synapse.run_plan("https://a.invalid", "sk-1", "m", ["basic"], timeout=1)
+        finally:
+            synapse.probe = orig
+        self.assertEqual(out["basic"]["kind"], "internal_error")
+
+    def test_internal_error_is_not_a_station_outage(self):
+        """内部错误不进连续失败计数, 但要让整轮体检算"有异常"(退出码 1)。"""
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        saved = synapse.HOME
+        synapse.HOME = tmp
+        try:
+            stat = synapse._outage_track([
+                {"target": "t", "model": "m", "kind": "internal_error", "test": "basic"},
+            ])
+            snap = synapse.load_json(os.path.join(tmp, ".outage.json"), {})
+        finally:
+            synapse.HOME = saved
+        self.assertEqual(snap, {})                     # 没被写成"站挂了"
+        self.assertEqual(stat["bad"], 1)               # 但本轮确实有异常
+
+    def test_systemctl_missing_binary_is_127(self):
+        orig = synapse.subprocess.run
+        def boom(*a, **k): raise FileNotFoundError("no systemctl")
+        synapse.subprocess.run = boom
+        try:
+            rc, out = synapse._systemctl("status", "x")
+        finally:
+            synapse.subprocess.run = orig
+        self.assertEqual(rc, 127)
+
+    def test_systemctl_does_not_swallow_programming_bugs(self):
+        """_systemctl 只该兜系统层错误; 我们自己的 bug 要炸出来。"""
+        orig = synapse.subprocess.run
+        def boom(*a, **k): raise RuntimeError("kaboom")
+        synapse.subprocess.run = boom
+        try:
+            with self.assertRaises(RuntimeError):
+                synapse._systemctl("status", "x")
+        finally:
+            synapse.subprocess.run = orig
+
+
+class TestJsonOutputCoverage(unittest.TestCase):
+    """机器可读输出不能只有 `check` 有: 脚本要能问"台账里有什么"、"这站到底怎么了"。
+
+    diagnose 用假的 run_plan 注入结果, 不联网。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in ("HOME", "CONFIG", "REPORTS", "ISSUES")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        self.out, self.err = io.StringIO(), io.StringIO()
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {
+            "base_url": "https://a.invalid", "api_key": "sk-1",
+            "models": ["m1"], "enabled": True}}})
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        self.err.seek(0); self.err.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def test_issue_list_json(self):
+        self._run("issue", "add", "--target", "t", "--model", "m1",
+                  "--kind", "k", "--symptom", "现象B")
+        self.assertEqual(self._run("issue", "list", "--json"), 0)
+        d = self.json.loads(self.out.getvalue())
+        self.assertEqual(d["total"], 1)
+        self.assertEqual(d["issues"][0]["symptom"], "现象B")
+
+    def test_diagnose_json(self):
+        orig = synapse.run_plan
+        synapse.run_plan = lambda url, key, model, plan, **kw: {
+            k: {"kind": "ok", "http": 200, "latency_ms": 5, "snippet": ""} for k in plan}
+        try:
+            rc = self._run("diagnose", "--target", "t", "--json")
+        finally:
+            synapse.run_plan = orig
+        self.assertEqual(rc, 0)
+        d = self.json.loads(self.out.getvalue())
+        self.assertEqual(d["target"], "t")
+        self.assertEqual(d["model"], "m1")
+        self.assertEqual(d["results"]["basic"]["kind"], "ok")
+        self.assertTrue(d["conclusions"])            # 结论必须是机器可读的数组
+
+    def test_diagnose_thinking_unsupported_conclusion(self):
+        """这条分支以前没测过, 结果 %-格式串少传一个参数直接 TypeError 崩了。
+        结论文字里的"建议命令"必须能正确格式化。"""
+        orig = synapse.run_plan
+        def fake(url, key, model, plan, **kw):
+            return {k: {"kind": "thinking_unsupported" if k == "thinking" else "ok",
+                        "http": 200, "latency_ms": 1, "snippet": ""} for k in plan}
+        synapse.run_plan = fake
+        try:
+            rc = self._run("diagnose", "--target", "t", "--json")
+        finally:
+            synapse.run_plan = orig
+        self.assertEqual(rc, 0)
+        d = self.json.loads(self.out.getvalue())
+        joined = " ".join(d["conclusions"])
+        self.assertIn("reasoning", joined)
+        self.assertIn("fix --target t --model m1", joined)
+
+    def test_diagnose_vision_and_cache_conclusions(self):
+        orig = synapse.run_plan
+        def fake(url, key, model, plan, **kw):
+            bad = {"vision_user": "bad_request", "cache": "cache_miss"}
+            return {k: {"kind": bad.get(k, "ok"), "http": 200 if k not in bad else 400,
+                        "latency_ms": 1, "snippet": ""} for k in plan}
+        synapse.run_plan = fake
+        try:
+            rc = self._run("diagnose", "--target", "t", "--json", "--vision", "--cache")
+        finally:
+            synapse.run_plan = orig
+        self.assertEqual(rc, 0)
+        d = self.json.loads(self.out.getvalue())
+        joined = " ".join(d["conclusions"])
+        self.assertIn("disable-image", joined)
+        self.assertIn("缓存", joined)
+        self.assertEqual(d["results"]["cache"]["kind"], "cache_miss")
+
+    @property
+    def json(self):
+        import json as _j
+        return _j
+
+
 class TestCli(unittest.TestCase):
     """端到端跑 main(), 输出流注入 StringIO。
 
@@ -355,7 +579,8 @@ class TestCli(unittest.TestCase):
             setattr(synapse, k, v)
 
     def _run(self, *argv):
-        self.out.truncate(0); self.err.truncate(0)
+        self.out.seek(0); self.out.truncate(0)
+        self.err.seek(0); self.err.truncate(0)
         return synapse.main(list(argv), out=self.out, err=self.err)
 
     def _config(self, targets):

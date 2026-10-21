@@ -1,3 +1,22 @@
+synapse (1.5.0) unstable; urgency=medium
+
+  * 异常分诊: 网络异常(conn_error/timeout)与"我们自己的 bug"(internal_error)分开报。
+    旧实现把 probe 里所有 Exception 一律当 conn_error —— 自己的 KeyError
+    会被报成"站连不上", 用户就去追一个本该健康的站(最坏的一种假阳性)
+  * 收窄 except: probe 内层 JSON 解析只兜 (ValueError/TypeError/AttributeError),
+    _systemctl/journalctl 只兜 (OSError/SubprocessError), strptime 只兜
+    (ValueError/TypeError)。except Exception 由 9 处降到 4 处, 且都走分诊
+  * internal_error 不计入连续失败/不污染 .outage.json, 但整轮仍按异常返回 1;
+    判定文案明确写着"这是本程序的 bug, 别去折腾中转站"
+  * --json 覆盖补齐: diagnose 输出 {results, conclusions}, issue list 输出
+    {total, open, filter, issues}; 人类可读内容一律走 stderr
+  * 修 diagnose 结论里的 %-格式串少传参数导致的 TypeError(可运行提示文案)
+  * 新增文档一致性测试: man/control/changelog 的版本号必须等于 __version__
+    (man page 之前一直写着 1.0.0, 发到 1.4.0 都没人发现)
+  * 测试 48 -> 67 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 16:45:00 +0800
+
 synapse (1.4.0) unstable; urgency=medium
 
   * 重构输出层: 所有输出走 Ctx(say/json/die), main(argv, out, err) 返回退出码,

@@ -11,11 +11,13 @@ Synapse — pi 模型连通性定期检查 / 诊断 / 配置修复
 import argparse
 import concurrent.futures as futures
 import datetime
+import http.client
 import json
 import os
 import re
 import shutil
 import ssl
+import subprocess
 import sys
 import time
 import urllib.error
@@ -25,7 +27,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 def _init_home():
@@ -400,7 +402,10 @@ def probe(url, key, model, thinking=False, tools=False, stream=False, timeout=60
                 kind = "ok_truncated"
             if tools:
                 kind, snippet = _judge_tool_resp(kind, j, raw, snippet)
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
+            # 只兜"响应不是我们期望的 JSON 形状": 非 JSON(ValueError)、
+            # 顶层不是对象(AttributeError)、字段类型不对(TypeError)。
+            # _judge_tool_resp 里的 bug 会冒到外层 → internal_error, 不再被吞。
             kind = "ok_nonjson"
             low = raw.lower()
             if tools and (_looks_like_toolcall_text(raw)):
@@ -410,9 +415,8 @@ def probe(url, key, model, thinking=False, tools=False, stream=False, timeout=60
         raw = e.read(2000).decode("utf-8", "replace")
         snippet = raw[:220]
         kind = classify(http, raw, thinking)
-    except Exception as e:
-        kind, snippet = ("timeout", f"{type(e).__name__}: {e}") if "timed out" in str(e).lower() \
-            else ("conn_error", f"{type(e).__name__}: {e}")
+    except Exception as e:                  # noqa: BLE001 —— 单条探针不该炸掉整轮
+        kind, snippet = _net_or_internal(e)
     return {"kind": kind, "http": http, "latency_ms": int((time.time() - t0) * 1000),
             "snippet": snippet.replace("\n", " ")}
 
@@ -454,16 +458,15 @@ def probe_multi(url, key, model, prompts, timeout=60, tools=False):
                                     if isinstance(x, dict) and x.get("type") == "text")
                 if j.get("stop_reason") == "max_tokens":
                     kind = "ok_truncated"
-            except Exception:
+            except (ValueError, TypeError, AttributeError):
                 kind = "ok_nonjson"
         except urllib.error.HTTPError as e:
             http = e.code
             raw = e.read(2000).decode("utf-8", "replace")
             snippet = raw[:220]
             kind = classify(http, raw, False)
-        except Exception as e:
-            kind, snippet = ("timeout", f"{type(e).__name__}: {e}") \
-                if "timed out" in str(e).lower() else ("conn_error", f"{type(e).__name__}: {e}")
+        except Exception as e:             # noqa: BLE001
+            kind, snippet = _net_or_internal(e)
         out.append({"kind": kind, "http": http, "snippet": snippet.replace("\n", " "),
                     "usage": usage, "text": text_out,
                     "latency_ms": int((time.time() - t0) * 1000)})
@@ -544,7 +547,28 @@ VERDICT = {
     "timeout": "❌ 超时",
     "conn_error": "❌ 连接失败(DNS/网络/TLS)",
     "config_error": "❌ 目标配置不完整(缺 base_url/api_key) → 该站本轮根本没被检查",
+    # 这一条永远不该出现在正常报告里; 出现就说明是 Synapse 自己的 bug, 别去折腾中转站。
+    "internal_error": "🐞 Synapse 内部错误(不是站的问题!) → 这是本程序的 bug, 请带着这一行提 issue",
 }
+
+# 网络层可预期异常。只有这些才配被解释成"站方/链路有问题"。
+# 其它异常(_net_or_internal 会判成 internal_error)一律是我们自己的 bug:
+# 旧实现 catch Exception 全算 conn_error, 我们自己的 KeyError 会被报成"站连不上",
+# 用户就去追一个本该健康的站 —— 这是最坏的一种假阳性。
+NET_ERRORS = (urllib.error.URLError, TimeoutError, ssl.SSLError,
+              http.client.HTTPException, OSError)
+
+
+def _net_or_internal(e):
+    """异常分诊: 网络问题 → timeout/conn_error; 我们自己的 bug → internal_error。
+
+    注意不吞异常语义: 这里只是给异常**贴标签**, 不是掩盖。internal_error 会
+    在报告里显眼地标成"不是站的问题", 并让整轮检查算异常(退出码 1)。
+    """
+    snip = f"{type(e).__name__}: {e}"
+    if isinstance(e, NET_ERRORS):
+        return ("timeout" if "timed out" in str(e).lower() else "conn_error"), snip
+    return "internal_error", snip
 
 
 # ---------------------------------------------------------------- output
@@ -673,9 +697,9 @@ def run_plan(url, key, model, plan, timeout=60, image_file=None):
             continue
         try:
             out[k] = probe(url, key, model, **mapping[k], **kw)
-        except Exception as e:
-            out[k] = {"kind": "conn_error", "http": 0, "latency_ms": 0,
-                      "snippet": f"{type(e).__name__}: {e}"}
+        except Exception as e:             # noqa: BLE001
+            kind, snip = _net_or_internal(e)
+            out[k] = {"kind": kind, "http": 0, "latency_ms": 0, "snippet": snip}
     return out
 
 
@@ -689,9 +713,9 @@ def probe_cache(url, key, model, timeout=60, samples=3):
     prompts = [CACHE_PAD + CACHE_Q1, CACHE_PAD + CACHE_Q2, CACHE_PAD + CACHE_Q1][:max(3, samples)]
     try:
         rows = probe_multi(url, key, model, prompts, timeout=timeout)
-    except Exception as e:
-        return {"kind": "conn_error", "http": 0, "latency_ms": 0,
-                "snippet": f"{type(e).__name__}: {e}"}
+    except Exception as e:                 # noqa: BLE001
+        kind, snip = _net_or_internal(e)
+        return {"kind": kind, "http": 0, "latency_ms": 0, "snippet": snip}
     first, second = rows[0], rows[-1]
     if first["kind"] not in ("ok", "ok_truncated", "ok_nonjson"):
         return {**first, "detail": "第一轮就失败，无法判缓存"}
@@ -805,8 +829,8 @@ def _outage_track(rows):
     GOOD = ("ok", "ok_truncated", "ok_nonjson", "ok_tool_use", "cache_passthrough")
     snap = load_json(os.path.join(HOME, ".outage.json"), {}) or {}
     for r in rows:
-        if r["kind"] == "config_error":
-            continue                      # 配置问题不是网络故障, 不该污染连续失败计数
+        if r["kind"] in ("config_error", "internal_error"):
+            continue                      # 配置问题/我们自己的 bug 都不是网络故障, 不该污染连续失败计数
         st = snap.setdefault(f"{r['target']}||{r['model']}",
                              {"ok": 0, "fail": 0, "streak": 0, "last": "", "last_kind": ""})
         st["last"], st["last_kind"] = now(), r["kind"]
@@ -821,7 +845,8 @@ def _outage_track(rows):
         "total": len(rows),
         "ok": sum(1 for r in rows if r["kind"] in GOOD),
         "bad": sum(1 for r in rows if r["kind"] in ("auth_failed", "no_channel",
-                                                     "auth_unavailable", "config_error")),
+                                                     "auth_unavailable", "config_error",
+                                                     "internal_error")),
         "warn": sum(1 for r in rows if r["kind"] in ("tool_call_text", "cache_miss", "server_error",
                                                       "rate_limited", "upstream_400", "waf_blocked")),
         "dead": sum(1 for r in rows if r["kind"] in ("timeout", "conn_error", "tool_call_broken")),
@@ -988,12 +1013,13 @@ def cmd_diagnose(args, ctx):
         extra.append("cache")
     plan = build_plan("diagnose", extra)
     image_file = getattr(args, "image_file", None)
-    results = {}
+    results, by_test = {}, {}
     for k in plan:
         label = TEST_LABELS[k]
         r = run_plan(url, key, model, [k], timeout=args.timeout,
                      image_file=image_file)[k]
         results[label] = r
+        by_test[k] = r
         ctx.say(f"{label:<30} {VERDICT.get(r['kind'], r['kind']):<40} {r['latency_ms']}ms")
         if r["snippet"]:
             ctx.say(f"{'':32}└─ {r['snippet'][:180]}")
@@ -1015,7 +1041,7 @@ def cmd_diagnose(args, ctx):
     if results[TEST_LABELS["thinking"]]["kind"] == "thinking_unsupported":
         conclusions.append("该渠道不支持 thinking 参数 → 在 pi 的 models.json 中把该模型 reasoning 改为 false "
                            "(可运行: %s fix --target %s --model %s --fix disable-reasoning --apply)"
-                           % (name, model))
+                           % (CMD, name, model))
     # 工具调用形态: 纯 tools 看能不能过, tools_raw 看返回结构完不完整
     tk = results[TEST_LABELS["tools"]]["kind"]
     rk = results[TEST_LABELS["tools_raw"]]["kind"]
@@ -1034,7 +1060,7 @@ def cmd_diagnose(args, ctx):
     if TEST_LABELS["vision_user"] in results and results[TEST_LABELS["vision_user"]]["kind"] not in ("ok", "ok_truncated"):
         conclusions.append("该渠道不接受图像输入 → 在 pi 的 models.json 中把该模型 input 改为 [\"text\"] "
                            "(可运行: %s fix --target %s --model %s --fix disable-image --apply)"
-                           % (name, model))
+                           % (CMD, name, model))
     if TEST_LABELS["vision_tool"] in results:
         vk = results[TEST_LABELS["vision_tool"]]["kind"]
         if vk in ("ok", "ok_truncated"):
@@ -1051,8 +1077,13 @@ def cmd_diagnose(args, ctx):
             conclusions.append("缓存测试未跑成(超时/报错), 无法判定。")
     for c in conclusions:
         ctx.say(" •", c)
+    payload = {"time": now(), "target": name, "model": model, "base_url": url,
+               "results": by_test, "conclusions": conclusions}
+    if ctx.as_json:                        # stdout 只留 JSON, 表格已自动走 stderr
+        ctx.json(payload)
     save_json(os.path.join(REPORTS, f"diagnose-{datetime.datetime.now():%Y%m%d-%H%M%S}.json"),
-              {"time": now(), "target": name, "model": model, "results": results})
+              payload)
+    return 0
 
 
 def cmd_status(args, ctx):
@@ -1274,12 +1305,13 @@ def cmd_cron(args, ctx):
 def _systemctl(*a):
     """跑 systemctl --user, 返回 (rc, 合并输出)。"""
     try:
-        r = __import__("subprocess").run(
+        r = subprocess.run(
             ["systemctl", "--user", *a], capture_output=True, text=True, timeout=30)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except FileNotFoundError:
         return 127, "systemctl 不存在"
-    except Exception as e:                     # noqa: BLE001
+    except (OSError, subprocess.SubprocessError) as e:
+        # 只兜系统层问题; 我们自己的 bug(如类型错)要炸出来, 别伪装成"没装 systemd"
         return 1, f"{e}"
 
 
@@ -1379,11 +1411,11 @@ def cmd_timer(args, ctx):
               else f"[!] {out.strip()}")
     elif action == "log":
         try:
-            r = __import__("subprocess").run(
+            r = subprocess.run(
                 ["journalctl", "--user", "-u", SERVICE_UNIT, "-n", "50", "--no-pager"],
                 capture_output=True, text=True, timeout=30)
             ctx.say(r.stdout or r.stderr)
-        except Exception as e:                 # noqa: BLE001
+        except (OSError, subprocess.SubprocessError) as e:
             ctx.say(f"[!] 读日志失败: {e}")
     else:  # status
         rc, out = _systemctl("is-enabled", TIMER_UNIT)
@@ -1449,7 +1481,14 @@ def cmd_issue(args, ctx):
         save_issues(db)
         ctx.say(f"[#{n}] 已记录: {args.symptom}")
     elif args.action == "list":
-        _print_issues(ctx, db, args.status or "all")
+        flt = args.status or "all"
+        rows = [i for i in db["issues"] if flt == "all" or i["status"] == flt]
+        if ctx.as_json:
+            ctx.json({"total": len(rows),
+                      "open": sum(1 for i in rows if i["status"] == "open"),
+                      "filter": flt, "issues": rows})
+        else:
+            _print_issues(ctx, db, flt)
     elif args.action == "note":
         it = _find_issue(db, args.id)
         it.setdefault("notes", []).append({"time": now(), "text": args.symptom})
@@ -1483,7 +1522,7 @@ def issue_add_auto(db, target, model, kind, symptom, cause="", plan="", ts=None,
             continue
         try:
             t = datetime.datetime.strptime(i["time"], "%Y-%m-%d %H:%M:%S")
-        except Exception:
+        except (ValueError, TypeError) as _e:   # 手改坏的 issues.json 不该崩
             t = now_dt
         if (now_dt - t).total_seconds() > dedup_hours * 3600:
             continue
@@ -1537,6 +1576,8 @@ def main(argv=None, out=None, err=None):
     p.add_argument("--vision", action="store_true", help="附带图像输入测试")
     p.add_argument("--cache", action="store_true", help="附带前缀缓存测试(💰)")
     p.add_argument("--image-file", help="用真实图片文件代替内置色块(更适合验证“看得懂图”)")
+    p.add_argument("--json", dest="as_json", action="store_true",
+                   help="stdout 输出机器可读 JSON(人话走 stderr)")
     p.set_defaults(fn=cmd_diagnose)
 
     p = sub.add_parser("fix", help="修复pi配置(默认预览, --apply 才写入)")
@@ -1581,6 +1622,8 @@ def main(argv=None, out=None, err=None):
                    help="list: 只列某个状态(默认 all)")
     p.add_argument("status_pos", nargs="?", choices=["open", "doing", "done", "wontfix"],
                    help="status: 新状态(位置参数, 与 --new-status 等价)")
+    p.add_argument("--json", dest="as_json", action="store_true",
+                   help="list: 输出 JSON 而不是表格")
     p.set_defaults(fn=cmd_issue)
 
     p = sub.add_parser("sync-stations",
