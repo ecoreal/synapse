@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.16.0"
+__version__ = "1.17.0"
 
 
 def _init_home():
@@ -1396,10 +1396,31 @@ def cmd_best(args, ctx):
     top = getattr(args, "top", 10)
     shown = ranked[:top]
 
+    # 与"你现在标为默认的那个"对账: 工具推荐了 A, 却不说默认是 0% 的 B,
+    # 等于把最后一步("那我要改哪里")留给用户自己拼。
+    stations = _uptime_by_station(rows)
+    cur = None
+    try:
+        cfg = load_config() or {}
+    except SynapseExit:
+        cfg = {}                          # config 坏了: doctor 会报, 这里不重复吵
+    tg = cfg.get("targets") or {}
+    dflt = [n for n, v in tg.items() if isinstance(v, dict) and v.get("default")]
+    if dflt and stations:
+        name = dflt[0]
+        st = next((x for x in stations if x["target"] == name), None)
+        cur = {"target": name,
+               "verdict": (st or {}).get("verdict", "没有数据"),
+               "ok_rate": (st or {}).get("ok_rate"),
+               "samples": (st or {}).get("samples", 0),
+               "longest_streak": (st or {}).get("longest_streak", 0),
+               "mismatch": bool(pick and pick["target"] != name)}
+
     if ctx.as_json:
         ctx.json({"days": days, "window": window, "need": need,
                   "reports_used": used, "unreadable_reports": bad,
                   "pick": ({"target": pick["target"], "model": pick["model"]} if pick else None),
+                  "current_default": cur,
                   "ranked": shown, "excluded": excluded,
                   "insufficient_samples": [{"target": r["target"], "model": r["model"],
                                             "samples": r["samples"]} for r in thin],
@@ -1435,6 +1456,14 @@ def cmd_best(args, ctx):
         else:
             ctx.say("\n[!] 没有判定为「稳」或「勉强」的目标 —— 别硬选一个, "
                     "先看 " + f"{CMD} explain")
+        if cur and cur["mismatch"]:
+            rate = (f"{cur['ok_rate'] * 100:.1f}%" if cur["ok_rate"] is not None
+                    else "无数据")
+            ctx.say(f"\n[!] 默认站: config 里标了 default 的是 {cur['target']}, "
+                    f"而现在判定是 {cur['verdict']}({rate}, "
+                    f"{cur['samples']} 次, 连败 {cur['longest_streak']})")
+            ctx.say(f"    建议改成上面推荐的那个: {CMD} sync-stations --default "
+                    f"{pick['target']}")
     else:
         ctx.say("  (没有样本足够的候选 —— 见下方说明)")
 

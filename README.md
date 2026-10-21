@@ -30,6 +30,9 @@ pi 模型中转站的连通性监控 / 诊断 / 配置修复工具。
 - 排序依次看成功率 → 最长连败 → p50 延迟 → 样本数，**刻意不编加权总分**
 - `--need tools` 只留"这项能力最近一次真的通过"的目标；被排除的连原因一起列出
 - 没有"稳/勉强"的候选时，明说"别硬选一个"，而不是硬给第一名
+- 会跟 config 里标着 `default` 的站**对账**：默认站判定"不建议"而推荐的是别人时，直接说出来并给改法
+
+真实数据上它的最后一句是：「默认站: config 里标了 default 的是 hyb, 而现在判定是 不建议(45.1%, 51 次, 连败 17)」——推荐和现状的落差，一步之内看得见。
 
 真实数据上一句话就够：tierflow 100% / p50 1.7s，windhub 也 100% / p50 9.8s——成功率打平，延迟差 5 倍。
 
@@ -302,7 +305,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 167 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 170 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

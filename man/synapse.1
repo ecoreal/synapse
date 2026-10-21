@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.16.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.17.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -98,6 +98,12 @@ tools, 长对话要 cache, 看图要 vision); 被排除的会连原因一起列�
 不会凭空消失
 .IP \(bu 2
 没有判定为"稳/勉强"的候选时, 明确说"别硬选一个", 而不是给出第一名
+.PP
+.IP \(bu 2
+把推荐结果和 config 里标着 \fBdefault\fR 的站**对账**: 如果默认站判定是
+"不建议"而推荐的是别的, 会直接说出来并给出改法
+(\fB\-\-default\fR)。"工具推荐了 A, 却不说你默认正用着 0% 的 B"
+等于把最后一步留给用户自己拼。
 .PP
 真实数据上它一句话就说清了: tierflow 100% / p50 1.7s 与 windhub 100% /
 p50 9.8s 成功率打平, 但延迟差 5 倍 —— 平局靠延迟分胜负, 这正是排名的用处。

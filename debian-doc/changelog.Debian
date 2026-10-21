@@ -1,3 +1,16 @@
+synapse (1.17.0) unstable; urgency=medium
+
+  * best: 把推荐和 config 里的默认站对账
+    - 默认站判定"不建议"而推荐是别的站时, 直接说出来并给出改法
+      (引入 sync-stations --default <站>)
+    - --json 增加 current_default: {target, verdict, ok_rate, samples,
+      longest_streak, mismatch}
+    - 默认站就是最优时不吵(只在有落差时提示)
+    - 真实数据: 默认站 hyb 45.1% / 51 次 / 连败 17, 推荐 tierflow
+  * 测试 167 -> 170 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 22:30:00 +0800
+
 synapse (1.16.0) unstable; urgency=medium
 
   * 新增 best: 该用哪个站/模型(把监控变成决策)

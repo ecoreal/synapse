@@ -2002,6 +2002,55 @@ class TestBest(unittest.TestCase):
         for k in ("target", "model", "ok_rate", "samples", "verdict", "longest_streak"):
             self.assertIn(k, row)
 
+
+    def test_warns_when_the_default_target_is_the_worst_one(self):
+        """最贵的假信号: 工具推荐了 A, 却不说你标为默认的是那个 0% 的 B。
+
+        用户不会自己把 best 的输出和 config 的 default 标记对起来 ——
+        那正是工具该替他做的事。
+        """
+        cfg = {"targets": {"good": {"enabled": True, "models": ["m1"]},
+                           "bad": {"enabled": True, "models": ["m1"],
+                                   "default": True}}}
+        with open(synapse.CONFIG, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        for i in range(6):
+            self._round(f"2026102{i}-100000",
+                        [self._row("good", "m1", "ok"),
+                         self._row("bad", "m1", "timeout")])
+        synapse.main(["best", "--days", "0"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("default", text)
+        self.assertIn("bad", text)
+        self.assertIn("推荐: good/m1", text)
+        self.assertIn("sync-stations --default good", text)
+
+    def test_says_nothing_when_the_default_is_already_the_best(self):
+        cfg = {"targets": {"good": {"enabled": True, "models": ["m1"],
+                                    "default": True}}}
+        with open(synapse.CONFIG, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        for i in range(6):
+            self._round(f"2026102{i}-100000", [self._row("good", "m1", "ok")])
+        synapse.main(["best", "--days", "0"], out=self.out, err=self.err)
+        self.assertNotIn("[!] 默认站", self.out.getvalue())
+
+    def test_json_reports_the_current_default(self):
+        cfg = {"targets": {"bad": {"enabled": True, "models": ["m1"],
+                                   "default": True},
+                           "good": {"enabled": True, "models": ["m1"]}}}
+        with open(synapse.CONFIG, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        for i in range(6):
+            self._round(f"2026102{i}-100000",
+                        [self._row("good", "m1", "ok"),
+                         self._row("bad", "m1", "timeout")])
+        synapse.main(["best", "--days", "0", "--json"], out=self.out, err=self.err)
+        d = json.loads(self.out.getvalue())
+        self.assertEqual(d["current_default"]["target"], "bad")
+        self.assertEqual(d["current_default"]["verdict"], "不建议")
+        self.assertTrue(d["current_default"]["mismatch"])
+
     def test_empty_history_says_so_instead_of_printing_a_winner(self):
         rc = synapse.main(["best", "--days", "0"], out=self.out, err=self.err)
         self.assertEqual(rc, 0, self.err.getvalue())
