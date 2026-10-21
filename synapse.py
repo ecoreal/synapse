@@ -25,18 +25,21 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 
 def _init_home():
     """用户数据目录: $SYNAPSE_HOME 或 ~/.config/synapse。
     打包成系统软件后代码在只读的 /usr 下, 数据必须另放。
     兼容老版本(数据跟脚本放一起): 首次运行时把旧数据迁移过去。"""
-    home = os.environ.get("SYNAPSE_HOME") or os.path.join(
-        os.path.expanduser("~/.config"), "synapse")
-    home = os.path.abspath(home)
+    default_home = os.path.abspath(os.path.join(os.path.expanduser("~/.config"), "synapse"))
+    home = os.path.abspath(os.environ.get("SYNAPSE_HOME") or default_home)
     os.makedirs(home, exist_ok=True)
-    # 旧布局迁移: 脚本目录里有数据文件而新目录还没有 → 复制一份过去(不删原件)
+    # 旧布局迁移: 只对**默认**数据目录做。
+    # 显式给了 SYNAPSE_HOME 就是"我就要用这个目录", 不该被塞进项目目录里的旧数据
+    # (否则临时目录/沙箱测试会被真实配置污染, 也会误导"空环境"验证)。
+    if home != default_home:
+        return home
     for fn in ("config.json", "STATIONS.md", "issues.json", ".outage.json",
                ".dirty", ".targets_snapshot.json"):
         src = os.path.join(BASE, fn)
@@ -61,6 +64,19 @@ CONFIG = os.path.join(HOME, "config.json")
 STATIONS = os.path.join(HOME, "STATIONS.md")   # 用户维护的中转站清单(URL/key/模型)
 REPORTS = os.path.join(HOME, "reports")
 LOCK = os.path.join(HOME, ".dirty")      # 探测目标清单被我方变更时落一个脏标记
+
+# 提示语里该怎么称呼"自己": 装成系统命令后是 synapse, 直接跑源码才是 python3 synapse.py
+_self = os.path.abspath(sys.argv[0] or "synapse.py")
+if _self.startswith("/usr/lib/synapse/") or _self == "/usr/bin/synapse":
+    CMD = "synapse"
+else:
+    _nm = os.path.basename(_self)
+    if _nm in ("-c", "", "-"):          # python3 -c "import synapse" 之类, 没有脚本名
+        CMD = "python3 synapse.py"
+    else:
+        _rel = os.path.relpath(_self)
+        CMD = f"python3 {_rel if len(_rel) < 40 else _nm}"
+
 PROBE_TEXT = os.environ.get("SYNAPSE_PROBE_TEXT", "请只回复两个字：正常")
 # 避开中转站测活探针关键词(hi/你好等); 被反测活拦截时用 SYNAPSE_PROBE_TEXT 换一段重试
 CTX = ssl.create_default_context()
@@ -168,7 +184,7 @@ def chmod_private(path):
 def load_pi_models():
     d = load_json(PI_MODELS)
     if not d:
-        sys.exit(f"[!] 找不到或无法解析 {PI_MODELS}")
+        raise SynapseExit(f"[!] 找不到或无法解析 {PI_MODELS}")
     return d
 
 
@@ -212,11 +228,11 @@ def parse_stations(path=STATIONS):
     return rows
 
 
-def stations_to_config(path=STATIONS):
+def stations_to_config(path=STATIONS, say=None):
     """把 STATIONS.md 的表格转成 config.json 结构(不动 pi 的 models.json)。"""
     rows = parse_stations(path)
     if not rows:
-        sys.exit(f"[!] 没能从 {path} 解析到任何站，检查表格格式(需 4 列)")
+        raise SynapseExit(f"[!] 没能从 {path} 解析到任何站，检查表格格式(需 4 列)")
     cfg = {"$comment": "由 synapse.py sync-stations 从 STATIONS.md 生成; 手改会被下次同步覆盖。",
            "targets": {}}
     for r in rows:
@@ -229,7 +245,7 @@ def stations_to_config(path=STATIONS):
             e["api_key"] = r["key"]
             e["base_url"] = r["base_url"]
             if not r["base_url"] or not r["key"]:
-                print(f"[!] 跳过 {r['name']}: 需 base_url + api_key（或 key 写 pi:provider 复用 pi）")
+                (say or print)(f"[!] 跳过 {r['name']}: 需 base_url + api_key（或 key 写 pi:provider 复用 pi）")
                 continue
         e["models"] = r["models"]
         cfg["targets"][r["name"]] = e
@@ -239,7 +255,7 @@ def stations_to_config(path=STATIONS):
 def load_config():
     cfg = load_json(CONFIG)
     if cfg is None:
-        sys.exit(f"[!] 缺少 {CONFIG}，先运行: python3 synapse.py import-from-pi")
+        raise SynapseExit(f"[!] 缺少 {CONFIG}，先运行: {CMD} import-from-pi")
     return cfg
 
 
@@ -248,11 +264,11 @@ def resolve_target(cfg, name, api_key=None, base_url=None):
     if name:
         entry = cfg["targets"].get(name)
         if entry is None:
-            sys.exit(f"[!] config.json 中没有目标: {name}")
+            raise SynapseExit(f"[!] config.json 中没有目标: {name}")
     else:
         name = next((k for k, v in cfg["targets"].items() if v.get("default")), None)
         if name is None:
-            sys.exit("[!] config.json 中没有标记 default 的目标")
+            raise SynapseExit("[!] config.json 中没有标记 default 的目标")
         entry = cfg["targets"][name]
     key = api_key or entry.get("api_key")
     url = base_url or entry.get("base_url")
@@ -261,7 +277,7 @@ def resolve_target(cfg, name, api_key=None, base_url=None):
         key = pi.get("providers", {}).get(entry["key_from_pi"], {}).get("apiKey") or key
         url = url or pi.get("providers", {}).get(entry["key_from_pi"], {}).get("baseUrl")
     if not (url and key):
-        sys.exit(f"[!] 目标 {name} 缺少 base_url 或 api_key")
+        raise SynapseExit(f"[!] 目标 {name} 缺少 base_url 或 api_key")
     return name, url.rstrip("/"), key, entry
 
 
@@ -531,6 +547,47 @@ VERDICT = {
 }
 
 
+# ---------------------------------------------------------------- output
+
+class SynapseExit(Exception):
+    """可预期的退出(带人话消息)。
+
+    旧实现到处 sys.exit(), 既打断调用栈也没法在测试里断言。
+    现在统一抛这个, 由 main() 转成退出码 + 一条 stderr 消息。
+    """
+    def __init__(self, message="", code=1):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+class Ctx:
+    """所有输出的唯一出口。
+
+    say()  给人看的(表格/提示)。--json 时自动改道 stderr, 保证 stdout 只有 JSON。
+    json() 给机器看的, 永远走 stdout。
+    die()  可预期错误: 抛 SynapseExit, 由 main 统一转退出码。
+    """
+
+    def __init__(self, out=None, err=None, as_json=False):
+        self.out = out if out is not None else sys.stdout
+        self.err = err if err is not None else sys.stderr
+        self.as_json = as_json
+
+    def say(self, *a, **kw):
+        kw.setdefault("file", self.err if self.as_json else self.out)
+        print(*a, **kw)
+
+    def emit(self, text):
+        print(text, file=self.out)
+
+    def json(self, obj):
+        self.emit(json.dumps(obj, ensure_ascii=False, indent=2))
+
+    def die(self, msg, code=1):
+        raise SynapseExit(msg, code)
+
+
 # ---------------------------------------------------------------- commands
 
 
@@ -568,10 +625,12 @@ def targets_of(cfg, args):
             continue
         try:
             n, url, key, entry = resolve_target(cfg, name)
-        except SystemExit as e:
+        except (SynapseExit, SystemExit) as e:
+            # noqa: SystemExit 兼容老路径
             # 配置坏掉的站必须留在结果里: 旧实现塞个空 models, 该站一个测试都不跑,
             # 报告里也看不见 —— 用户会以为“全绿”, 实际是配置没填。
-            out.append((name, "", "", None, str(e.code or "配置不完整")))
+            out.append((name, "", "", None,
+                        getattr(e, "message", None) or str(getattr(e, "code", "") or "配置不完整")))
             continue
         models = entry.get("models") or []
         if getattr(args, "model", None):
@@ -814,7 +873,7 @@ def _auto_recover_from_rows(rows, db=None, say=None):
     return changed
 
 
-def cmd_check(args):
+def cmd_check(args, ctx):
     cfg = load_config()
     rows, t0 = [], time.time()
     stale = read_dirty()  # 目标清单自上次体检后被我方改过 → 提醒清理 pi 残留
@@ -849,50 +908,46 @@ def cmd_check(args):
     # 配置坏掉的目标排在最前面 —— 这是最该先修的, 不该被埋在后面
     rows = [_config_error_row(n, note) for n, note in cfg_errors] + rows
 
-    # 打印
-    # --json 时人类可读的一切走 stderr, stdout 只留 JSON, 否则 `check --json | jq` 会炸
-    def say(*a, **kw):
-        print(*a, file=sys.stderr if args.as_json else sys.stdout, **kw)
+    # 人类可读的输出统一走 ctx.say(): --json 时它会自动改道 stderr
 
-    say(f"\n=== Synapse 连通性检查  {now()} ===")
+    ctx.say(f"\n=== Synapse 连通性检查  {now()} ===")
     for r in rows:
         tag = {"vision_user": "🖼", "vision_tool": "🖼", "tools": "🔧", "tools_raw": "🔧", "cache": "💰"}.get(r.get("test"), "  ")
-        say(f"{tag}[{r['target']:<10}] {r['model']:<28} {VERDICT.get(r['kind'], r['kind']):<38} "
+        ctx.say(f"{tag}[{r['target']:<10}] {r['model']:<28} {VERDICT.get(r['kind'], r['kind']):<38} "
             f"{r['latency_ms']}ms  {('HTTP ' + str(r['http'])) if r['http'] else ''}")
         if args.verbose and r["snippet"]:
-            say(f"{'':12}└─ {r['snippet']}")
+            ctx.say(f"{'':12}└─ {r['snippet']}")
     ok_kinds = ("ok", "ok_truncated", "ok_nonjson", "ok_tool_use", "cache_passthrough")
     bad = [r for r in rows if r["kind"] not in ok_kinds]
-    say(f"\n合计 {len(rows)} 项, 异常 {len(bad)} 项, 耗时 {time.time()-t0:.1f}s")
+    ctx.say(f"\n合计 {len(rows)} 项, 异常 {len(bad)} 项, 耗时 {time.time()-t0:.1f}s")
 
     # 提醒: 一周期内反复失败的目标 → 建议临时禁用(不自动改配置)
     for hint in _streak_hints():
-        say(hint)
+        ctx.say(hint)
 
     # 提醒: 目标清单自上次体检后被我方改过 → 可能需要同步 pi 侧
     if stale:
         ts, what = (stale.split("\t", 1) + [""])[:2]
-        say(f"\n[!] 目标清单有变更未复查  自 {ts}: {what}")
+        ctx.say(f"\n[!] 目标清单有变更未复查  自 {ts}: {what}")
         if not args.target:            # 只在全量检查时确认清除, 单目标抽查不算
             clear_dirty()
-            say("    已清除标记(本轮全量体检已覆盖当前清单)")
+            ctx.say("    已清除标记(本轮全量体检已覆盖当前清单)")
 
     # 自动开单: 连续错误/agent 渠道损坏/缓存出现透传都记一笔(带 24h 去重)
     if getattr(args, "auto_issue", False):
-        _auto_issue_from_rows(rows, say=say)
+        _auto_issue_from_rows(rows, say=ctx.say)
 
     # 自愈: 全量体检里已恢复的自动单记一笔/结单(定向抽查不算, 不能证明整体好了)
     partial = bool(args.target or getattr(args, "model", None))
     if not partial:
-        _auto_recover_from_rows(rows, say=say)
+        _auto_recover_from_rows(rows, say=ctx.say)
 
     # 落盘
     os.makedirs(REPORTS, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     stat = _outage_track(rows)
     if args.as_json:
-        print(json.dumps({"time": now(), "summary": stat, "results": rows},
-                         ensure_ascii=False, indent=2))
+        ctx.json({"time": now(), "summary": stat, "results": rows})
     payload = {"time": now(), "summary": stat, "results": rows, "dirty": stale,
                "partial": partial}
     save_json(os.path.join(REPORTS, f"check-{stamp}.json"), payload)
@@ -902,8 +957,8 @@ def cmd_check(args):
     return 1 if bad else 0
 
 
-def cmd_watch(args):
-    print(f"[*] 周期监控已启动, 每 {args.interval}s 一次, Ctrl+C 退出")
+def cmd_watch(args, ctx):
+    ctx.say(f"[*] 周期监控已启动, 每 {args.interval}s 一次, Ctrl+C 退出")
     while True:
         try:
             cmd_check(argparse.Namespace(
@@ -913,19 +968,19 @@ def cmd_watch(args):
                 tools=getattr(args, "tools", False),
                 cache=getattr(args, "cache", False),
                 image_file=getattr(args, "image_file", None),
-                as_json=False))
-        except SystemExit as e:
-            print(e)
+                as_json=False), ctx)
+        except (SynapseExit, SystemExit) as e:
+            ctx.say(getattr(e, "message", None) or e)
         time.sleep(args.interval)
 
 
-def cmd_diagnose(args):
+def cmd_diagnose(args, ctx):
     cfg = load_config()
     name, url, key, entry = resolve_target(cfg, args.target, args.api_key, args.base_url)
     model = args.model or (entry.get("models") or [None])[0]
     if not model:
-        sys.exit("[!] 未指定模型")
-    print(f"\n=== Synapse 诊断  {now()}  [{name}] {model} @ {url} ===\n")
+        ctx.die("[!] 未指定模型")
+    ctx.say(f"\n=== Synapse 诊断  {now()}  [{name}] {model} @ {url} ===\n")
     extra = []
     if getattr(args, "vision", False):
         extra += ["vision_user", "vision_tool"]
@@ -939,10 +994,10 @@ def cmd_diagnose(args):
         r = run_plan(url, key, model, [k], timeout=args.timeout,
                      image_file=image_file)[k]
         results[label] = r
-        print(f"{label:<30} {VERDICT.get(r['kind'], r['kind']):<40} {r['latency_ms']}ms")
+        ctx.say(f"{label:<30} {VERDICT.get(r['kind'], r['kind']):<40} {r['latency_ms']}ms")
         if r["snippet"]:
-            print(f"{'':32}└─ {r['snippet'][:180]}")
-    print("\n--- 结论与建议 ---")
+            ctx.say(f"{'':32}└─ {r['snippet'][:180]}")
+    ctx.say("\n--- 结论与建议 ---")
     conclusions = []
     base = results[TEST_LABELS["basic"]]["kind"]
     if base in ("auth_failed",):
@@ -959,7 +1014,7 @@ def cmd_diagnose(args):
         conclusions.append("基础链路 OK。")
     if results[TEST_LABELS["thinking"]]["kind"] == "thinking_unsupported":
         conclusions.append("该渠道不支持 thinking 参数 → 在 pi 的 models.json 中把该模型 reasoning 改为 false "
-                           "(可运行: python3 synapse.py fix --target %s --model %s --fix disable-reasoning --apply)"
+                           "(可运行: %s fix --target %s --model %s --fix disable-reasoning --apply)"
                            % (name, model))
     # 工具调用形态: 纯 tools 看能不能过, tools_raw 看返回结构完不完整
     tk = results[TEST_LABELS["tools"]]["kind"]
@@ -978,7 +1033,7 @@ def cmd_diagnose(args):
         conclusions.append("⚠️ 带 tools 的请求超时/报错 → 该站工具链路不稳（cialo 实测就是这种“纯聊天可用、带工具就崩”）。")
     if TEST_LABELS["vision_user"] in results and results[TEST_LABELS["vision_user"]]["kind"] not in ("ok", "ok_truncated"):
         conclusions.append("该渠道不接受图像输入 → 在 pi 的 models.json 中把该模型 input 改为 [\"text\"] "
-                           "(可运行: python3 synapse.py fix --target %s --model %s --fix disable-image --apply)"
+                           "(可运行: %s fix --target %s --model %s --fix disable-image --apply)"
                            % (name, model))
     if TEST_LABELS["vision_tool"] in results:
         vk = results[TEST_LABELS["vision_tool"]]["kind"]
@@ -995,48 +1050,48 @@ def cmd_diagnose(args):
         else:
             conclusions.append("缓存测试未跑成(超时/报错), 无法判定。")
     for c in conclusions:
-        print(" •", c)
+        ctx.say(" •", c)
     save_json(os.path.join(REPORTS, f"diagnose-{datetime.datetime.now():%Y%m%d-%H%M%S}.json"),
               {"time": now(), "target": name, "model": model, "results": results})
 
 
-def cmd_status(args):
+def cmd_status(args, ctx):
     """一览全局: 目标清单 / 脏标记 / 长跑失败统计 / 未解决台账。看板式单次输出。"""
     cfg = load_config()
     db = load_issues()
     snap = load_json(os.path.join(HOME, ".outage.json"), {}) or {}
     dirty = read_dirty()
     if args.as_json:
-        print(json.dumps({"time": now(), "targets": cfg["targets"], "outage": snap,
-                          "dirty": dirty, "issues": db["issues"]}, ensure_ascii=False, indent=2))
+        ctx.json({"time": now(), "targets": cfg["targets"], "outage": snap,
+                          "dirty": dirty, "issues": db["issues"]})
         return 0
 
-    print(f"\n=== Synapse 状态  {now()} ===")
-    print(f"\n[目标清单] {sum(1 for e in cfg['targets'].values() if e.get('enabled', True))} 个启用")
+    ctx.say(f"\n=== Synapse 状态  {now()} ===")
+    ctx.say(f"\n[目标清单] {sum(1 for e in cfg['targets'].values() if e.get('enabled', True))} 个启用")
     for n, e in cfg["targets"].items():
         on = "✔" if e.get("enabled", True) else "✗禁用"
         dflt = " (default)" if e.get("default") else ""
-        print(f"  {on} {n:<15} models={len(e.get('models') or [])}{dflt}"
+        ctx.say(f"  {on} {n:<15} models={len(e.get('models') or [])}{dflt}"
               f"{'  key_from_pi=' + e['key_from_pi'] if e.get('key_from_pi') else ''}")
     if dirty:
         ts, what = (dirty.split("\t", 1) + [""])[:2]
-        print(f"\n[!] 脏标记(未复查): {what}  自 {ts}")
+        ctx.say(f"\n[!] 脏标记(未复查): {what}  自 {ts}")
 
-    print("\n[长跑失败统计] (.outage.json, 由 check 累计)")
+    ctx.say("\n[长跑失败统计] (.outage.json, 由 check 累计)")
     if not snap:
-        print("  (还没有数据, 先跑几次 check/watch)")
+        ctx.say("  (还没有数据, 先跑几次 check/watch)")
     else:
         rows = sorted(snap.items(), key=lambda kv: (-kv[1].get("streak", 0), -kv[1].get("fail", 0)))
         for key, st in rows:
             t, m = key.split("||", 1)
             flag = "🔴" if st.get("streak", 0) >= 2 else ("🟡" if st.get("fail") else "🟢")
-            print(f"  {flag} {t:<12} {m:<28} ok={st.get('ok', 0):<4} fail={st.get('fail', 0):<4}"
+            ctx.say(f"  {flag} {t:<12} {m:<28} ok={st.get('ok', 0):<4} fail={st.get('fail', 0):<4}"
                   f"连败={st.get('streak', 0):<3} 最近={st.get('last_kind', '')}")
 
-    print(f"\n[问题台账] 未解决 {sum(1 for i in db['issues'] if i['status'] in ('open', 'doing'))} 条")
+    ctx.say(f"\n[问题台账] 未解决 {sum(1 for i in db['issues'] if i['status'] in ('open', 'doing'))} 条")
     for i in db["issues"]:
         if i["status"] in ("open", "doing"):
-            print(f"  #{i['id']}[{i['status']}] {i['target'] or '-'}{('/' + i['model']) if i.get('model') else ''}:"
+            ctx.say(f"  #{i['id']}[{i['status']}] {i['target'] or '-'}{('/' + i['model']) if i.get('model') else ''}:"
                   f" {i['symptom'][:60]}")
     return 0
 
@@ -1048,14 +1103,14 @@ def _synced_log_line():
         return None
     return (f"- **{rep.get('time', '')}** — 共 {s.get('total', 0)} 项: "
             f"✅{s.get('ok', 0)} / ⚠{s.get('warn', 0)} / ❌{s.get('bad', 0) + s.get('dead', 0)}"
-            f"（详见 reports/latest.json，或 `python3 synapse.py status`）")
+            f"（详见 reports/latest.json，或 `{CMD} status`）")
 
 
-def cmd_sync_stations(args):
+def cmd_sync_stations(args, ctx):
     """从 STATIONS.md 读取站清单 → 同步到 config.json → 可选立刻体检。"""
     if not os.path.exists(STATIONS):
-        sys.exit(f"[!] 缺少 {STATIONS}")
-    new = stations_to_config()
+        ctx.die(f"[!] 缺少 {STATIONS}")
+    new = stations_to_config(say=ctx.say)
     old = load_json(CONFIG, {}) or {}
     oldt = old.get("targets", {})
 
@@ -1069,7 +1124,7 @@ def cmd_sync_stations(args):
         if args.default in new["targets"]:
             new["targets"][args.default]["default"] = True
         else:
-            sys.exit(f"[!] --default {args.default} 不在站清单里")
+            ctx.die(f"[!] --default {args.default} 不在站清单里")
     if not any(e.get("default") for e in new["targets"].values()):
         first = next(iter(new["targets"]), None)
         if first:
@@ -1081,8 +1136,8 @@ def cmd_sync_stations(args):
 
     save_json(CONFIG, new)
     chmod_private(CONFIG)
-    print(f"[同步] {STATIONS} → {CONFIG}")
-    print(f"  站数: {len(oldt)} → {len(new['targets'])}"
+    ctx.say(f"[同步] {STATIONS} → {CONFIG}")
+    ctx.say(f"  站数: {len(oldt)} → {len(new['targets'])}"
           + (f"  新增: {', '.join(added)}" if added else "")
           + (f"  移除: {', '.join(removed)}" if removed else "")
           + (f"  变更: {', '.join(changed)}" if changed else ""))
@@ -1094,15 +1149,15 @@ def cmd_sync_stations(args):
         line = _synced_log_line()
         if line:
             _append_log(line)
-            print("  已把最近一次体检摘要写入 STATIONS.md 日志区")
+            ctx.say("  已把最近一次体检摘要写入 STATIONS.md 日志区")
 
     if args.check:
-        print()
+        ctx.say()
         ns = argparse.Namespace(target=None, model=None, timeout=args.timeout, jobs=args.jobs,
                                 verbose=args.verbose, vision=args.vision, tools=args.tools,
                                 cache=args.cache, image_file=args.image_file,
                                 auto_issue=True, as_json=False)
-        return cmd_check(ns)
+        return cmd_check(ns, ctx)
     return 0
 
 
@@ -1122,32 +1177,32 @@ def _append_log(line):
     open(STATIONS, "w", encoding="utf-8").write(head + begin + mid + end + tail)
 
 
-def cmd_fix(args):
+def cmd_fix(args, ctx):
     """默认 dry-run 只预览; --apply 才写盘(用户下令)。"""
     pi = load_pi_models()
     prov = pi["providers"].get(args.target)
     if not prov:
-        sys.exit(f"[!] pi 配置里没有 provider: {args.target}")
+        ctx.die(f"[!] pi 配置里没有 provider: {args.target}")
     target = None
     for m in prov.get("models", []):
         if m.get("id") == args.model:
             target = m
             break
     if not target:
-        sys.exit(f"[!] provider {args.target} 下没有模型 {args.model}")
+        ctx.die(f"[!] provider {args.target} 下没有模型 {args.model}")
 
     if args.fix == "disable-reasoning":
         backup = PI_MODELS + f".bak.{datetime.datetime.now():%Y%m%d-%H%M%S}"
         patch = {"reasoning": False}
         if "thinkingLevelMap" in target:
             patch["-thinkingLevelMap"] = target["thinkingLevelMap"]
-        print("[预览] 将对", f"{args.target}/{args.model}")
-        print(f"  reasoning: {target.get('reasoning')} -> False")
+        ctx.say("[预览] 将对", f"{args.target}/{args.model}")
+        ctx.say(f"  reasoning: {target.get('reasoning')} -> False")
         if "thinkingLevelMap" in target:
-            print("  删除 thinkingLevelMap")
-        print(f"  备份路径: {backup}")
+            ctx.say("  删除 thinkingLevelMap")
+        ctx.say(f"  备份路径: {backup}")
         if not args.apply:
-            print("\n(仅预览。确认要改请加 --apply)")
+            ctx.say("\n(仅预览。确认要改请加 --apply)")
             return
         pi_bak = json.loads(json.dumps(pi))  # 快照
         target["reasoning"] = False
@@ -1155,29 +1210,29 @@ def cmd_fix(args):
         import shutil
         shutil.copy2(PI_MODELS, backup)
         save_json(PI_MODELS, pi)
-        print(f"[完成] 已写入 {PI_MODELS} (备份: {backup})。重启 pi 生效。")
+        ctx.say(f"[完成] 已写入 {PI_MODELS} (备份: {backup})。重启 pi 生效。")
     elif args.fix == "disable-image":
         cur = target.get("input", [])
         if cur == ["text"]:
-            print(f"[i] {args.target}/{args.model} 的 input 已经是 [\"text\"], 无需修改")
+            ctx.say(f"[i] {args.target}/{args.model} 的 input 已经是 [\"text\"], 无需修改")
             return
         backup = PI_MODELS + f".bak.{datetime.datetime.now():%Y%m%d-%H%M%S}"
-        print("[预览] 将对", f"{args.target}/{args.model}")
-        print(f"  input: {cur} -> [\"text\"]")
-        print(f"  备份路径: {backup}")
+        ctx.say("[预览] 将对", f"{args.target}/{args.model}")
+        ctx.say(f"  input: {cur} -> [\"text\"]")
+        ctx.say(f"  备份路径: {backup}")
         if not args.apply:
-            print("\n(仅预览。确认要改请加 --apply)")
+            ctx.say("\n(仅预览。确认要改请加 --apply)")
             return
         import shutil
         shutil.copy2(PI_MODELS, backup)
         target["input"] = ["text"]
         save_json(PI_MODELS, pi)
-        print(f"[完成] 已写入 {PI_MODELS} (备份: {backup})。重启 pi 生效。")
+        ctx.say(f"[完成] 已写入 {PI_MODELS} (备份: {backup})。重启 pi 生效。")
     else:
-        sys.exit(f"[!] 未知修复类型: {args.fix}")
+        ctx.die(f"[!] 未知修复类型: {args.fix}")
 
 
-def cmd_import(args):
+def cmd_import(args, ctx):
     pi = load_pi_models()
     cfg = {"$comment": "Synapse 目标配置。key_from_pi=引用pi里的provider(不重复存key); 也可直接填 base_url/api_key。",
            "targets": {}}
@@ -1192,12 +1247,12 @@ def cmd_import(args):
     cfg["targets"][args.default]["default"] = True
     save_json(CONFIG, cfg)
     mark_dirty("import-from-pi 重建目标清单")
-    print(f"[完成] 已从 pi 导入 {len(pi.get('providers', {}))} 个目标 -> {CONFIG}")
+    ctx.say(f"[完成] 已从 pi 导入 {len(pi.get('providers', {}))} 个目标 -> {CONFIG}")
     if args.edit_hint:
-        print("可编辑该文件增删目标、留 key_from_pi 引用, 或填独立 base_url/api_key add_new。")
+        ctx.say("可编辑该文件增删目标、留 key_from_pi 引用, 或填独立 base_url/api_key add_new。")
 
 
-def cmd_cron(args):
+def cmd_cron(args, ctx):
     exe = shutil.which("synapse") or os.path.abspath(__file__)
     if exe.endswith("synapse") and os.access(exe, os.X_OK):
         line = f"{args.schedule} {exe} check >/dev/null 2>&1"
@@ -1206,14 +1261,14 @@ def cmd_cron(args):
     if args.install:
         cur = os.popen("crontab -l 2>/dev/null").read()
         if "synapse.py check" in cur or "synapse check" in cur:
-            print("[i] crontab 已存在, 跳过")
+            ctx.say("[i] crontab 已存在, 跳过")
             return
         new = (cur.rstrip("\n") + "\n" + line + "\n# synapse\n") if cur.strip() else f"{line}\n# synapse\n"
         p = os.popen("crontab -", "w")
         p.write(new)
         p.close()
-        print("[完成] 已写入 crontab:")
-    print(" ", line)
+        ctx.say("[完成] 已写入 crontab:")
+    ctx.say(" ", line)
 
 
 def _systemctl(*a):
@@ -1289,16 +1344,16 @@ def _ensure_units():
     return wrote
 
 
-def cmd_timer(args):
+def cmd_timer(args, ctx):
     """systemd 用户定时器管理。
     若系统未装 systemd 用户会话(容器/裸 shell), 退回 crontab。"""
     action = args.action
     if action == "on":
         if _systemctl("show-environment")[0] != 0:
-            sys.exit("[!] 当前无 systemd 用户会话(容器环境?)，请改用: synapse cron --install")
+            ctx.die("[!] 当前无 systemd 用户会话(容器环境?)，请改用: synapse cron --install")
         wrote = _ensure_units()
         for p in wrote:
-            print(f"[i] 已写入单元: {p}")
+            ctx.say(f"[i] 已写入单元: {p}")
         # 间隔通过 drop-in 覆盖，不动包/用户目录里的 unit 本身
         os.makedirs(os.path.join(USER_UNIT_DIR, f"{TIMER_UNIT}.d"), exist_ok=True)
         with open(os.path.join(USER_UNIT_DIR, f"{TIMER_UNIT}.d", "override.conf"),
@@ -1308,34 +1363,34 @@ def cmd_timer(args):
         _systemctl("daemon-reload")
         rc, out = _systemctl("enable", "--now", TIMER_UNIT)
         if rc != 0:
-            sys.exit(f"[!] 启用失败: {out.strip()}")
-        print(f"[完成] 已启用 {TIMER_UNIT} (每 {args.interval} 一次)")
+            ctx.die(f"[!] 启用失败: {out.strip()}")
+        ctx.say(f"[完成] 已启用 {TIMER_UNIT} (每 {args.interval} 一次)")
         if args.now:
             rc2, out2 = _systemctl("start", "--no-block", SERVICE_UNIT)
-            print("[i] 已触发首轮体检(后台跑)" if rc2 == 0 else f"[!] 首轮触发失败: {out2.strip()}")
+            ctx.say("[i] 已触发首轮体检(后台跑)" if rc2 == 0 else f"[!] 首轮触发失败: {out2.strip()}")
         rc3, out3 = _systemctl("is-enabled", TIMER_UNIT)
-        print(f"    状态: {out3.strip() or '(未知)'}")
+        ctx.say(f"    状态: {out3.strip() or '(未知)'}")
     elif action == "off":
         rc, out = _systemctl("disable", "--now", TIMER_UNIT)
-        print("[完成] 已停用" if rc == 0 else f"[i] {out.strip()}")
+        ctx.say("[完成] 已停用" if rc == 0 else f"[i] {out.strip()}")
     elif action == "run":
         rc, out = _systemctl("start", "--no-block", SERVICE_UNIT)
-        print("[完成] 已触发一轮 check(后台跑, 用 synapse timer log 看输出)" if rc == 0
+        ctx.say("[完成] 已触发一轮 check(后台跑, 用 synapse timer log 看输出)" if rc == 0
               else f"[!] {out.strip()}")
     elif action == "log":
         try:
             r = __import__("subprocess").run(
                 ["journalctl", "--user", "-u", SERVICE_UNIT, "-n", "50", "--no-pager"],
                 capture_output=True, text=True, timeout=30)
-            print(r.stdout or r.stderr)
+            ctx.say(r.stdout or r.stderr)
         except Exception as e:                 # noqa: BLE001
-            print(f"[!] 读日志失败: {e}")
+            ctx.say(f"[!] 读日志失败: {e}")
     else:  # status
         rc, out = _systemctl("is-enabled", TIMER_UNIT)
-        print(f"{TIMER_UNIT}: {out.strip() or '未安装'}")
+        ctx.say(f"{TIMER_UNIT}: {out.strip() or '未安装'}")
         rc2, out2 = _systemctl("list-timers", TIMER_UNIT, "--no-pager")
-        print(out2.rstrip() or "(无定时器记录)")
-        print("\n命令: synapse timer on --interval 1h | off | run | log")
+        ctx.say(out2.rstrip() or "(无定时器记录)")
+        ctx.say("\n命令: synapse timer on --interval 1h | off | run | log")
 
 
 # ---------------------------------------------------------------- main
@@ -1353,33 +1408,33 @@ def load_issues():
 def save_issues(d):
     save_json(ISSUES, d)
 
-def _print_issues(db, flt="all"):
+def _print_issues(ctx, db, flt="all"):
     for i in db["issues"]:
         if flt != "all" and i["status"] != flt:
             continue
         tag = "自动" if i.get("auto") else "手工"
-        print(f"[#{i['id']}][{i['status']:<7}] {i['time']}  "
+        ctx.say(f"[#{i['id']}][{i['status']:<7}] {i['time']}  "
               f"{i['target'] or '-'}{('/' + i['model']) if i.get('model') else ''}  ({tag}/{i.get('kind') or '-'})")
-        print(f"    现象: {i['symptom']}")
+        ctx.say(f"    现象: {i['symptom']}")
         if i.get("cause"):
-            print(f"    原因: {i['cause']}")
+            ctx.say(f"    原因: {i['cause']}")
         if i.get("plan"):
-            print(f"    计划: {i['plan']}")
+            ctx.say(f"    计划: {i['plan']}")
         for n_, no in enumerate(i.get("notes", []), 1):
             t_ = no.get("text") if isinstance(no, dict) else str(no)
-            print(f"    备注{n_}: {t_}")
+            ctx.say(f"    备注{n_}: {t_}")
     n_open = sum(1 for i in db["issues"] if i["status"] == "open")
-    print(f"\n共 {len(db['issues'])} 条, 未解决 {n_open} 条")
+    ctx.say(f"\n共 {len(db['issues'])} 条, 未解决 {n_open} 条")
 
 
 def _find_issue(db, iid):
     for i in db["issues"]:
         if i["id"] == iid:
             return i
-    sys.exit(f"[!] 没有 #{iid}")
+    raise SynapseExit(f"[!] 没有 #{iid}")
 
 
-def cmd_issue(args):
+def cmd_issue(args, ctx):
     db = load_issues()
     args.id = getattr(args, "id", None) or getattr(args, "id_pos", None)
     if args.action == "add":
@@ -1392,26 +1447,26 @@ def cmd_issue(args):
             "plan": args.plan or "", "notes": []
         })
         save_issues(db)
-        print(f"[#{n}] 已记录: {args.symptom}")
+        ctx.say(f"[#{n}] 已记录: {args.symptom}")
     elif args.action == "list":
-        _print_issues(db, args.status or "all")
+        _print_issues(ctx, db, args.status or "all")
     elif args.action == "note":
         it = _find_issue(db, args.id)
         it.setdefault("notes", []).append({"time": now(), "text": args.symptom})
         save_issues(db)
-        print(f"[#{it['id']}] 已加备注")
+        ctx.say(f"[#{it['id']}] 已加备注")
     elif args.action == "status":
         st = args.new_status or getattr(args, "status_pos", None)
         it = _find_issue(db, args.id)
         it["status"] = st
         it.setdefault("notes", []).append({"time": now(), "text": f"状态 → {st}" + ("  " + args.text if args.text else "")})
         save_issues(db)
-        print(f"[#{it['id']}] 状态 → {st}")
+        ctx.say(f"[#{it['id']}] 状态 → {st}")
     elif args.action == "rm":
         it = _find_issue(db, args.id)
         db["issues"] = [i for i in db["issues"] if i["id"] != args.id]
         save_issues(db)
-        print(f"[#{args.id}] 已删除(原现象: {it.get('symptom', '')[:40]})")
+        ctx.say(f"[#{args.id}] 已删除(原现象: {it.get('symptom', '')[:40]})")
     return 0
 
 
@@ -1441,7 +1496,8 @@ def issue_add_auto(db, target, model, kind, symptom, cause="", plan="", ts=None,
                          "notes": [], "auto": True})
     return n, True
 
-def main():
+def main(argv=None, out=None, err=None):
+    """返回退出码（不再 sys.exit），输出流可注入 → CLI 可端到端测试。"""
     ap = argparse.ArgumentParser(description="Synapse — pi 模型连通性监控/诊断")
     ap.add_argument("--version", action="version",
                     version=f"synapse {__version__}",
@@ -1546,9 +1602,21 @@ def main():
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(fn=cmd_status)
 
-    args = ap.parse_args()
-    sys.exit(args.fn(args) or 0)
+    ctx = Ctx(out, err)
+    try:
+        args = ap.parse_args(argv)        # --version/--help 在这里抛 SystemExit
+        ctx.as_json = bool(getattr(args, "as_json", False))
+        return args.fn(args, ctx) or 0
+    except SynapseExit as e:
+        if e.message:
+            print(e.message, file=ctx.err)
+        return e.code
+    except SystemExit as e:                 # argparse --version / --help
+        return int(e.code or 0)
+    except KeyboardInterrupt:
+        print("\n[中断]", file=ctx.err)
+        return 130
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

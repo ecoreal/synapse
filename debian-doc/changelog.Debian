@@ -1,3 +1,18 @@
+synapse (1.4.0) unstable; urgency=medium
+
+  * 重构输出层: 所有输出走 Ctx(say/json/die), main(argv, out, err) 返回退出码,
+    不再到处 print + sys.exit。CLI 从此可端到端测试(输出可注入、返回码可断言)
+  * 修 SYNAPSE_HOME 意外继承项目目录旧数据: 显式指定数据目录时不再做"旧布局迁移",
+    否则临时目录/沙箱会被真实配置污染, "空环境验证"根本验不出来
+  * 库函数里的 sys.exit 改为抛 SynapseExit, 由 main 统一转成退出码 + 一条错误消息;
+    argparse 的 --version/--help/非法参数不再直接打断调用方
+  * 退出码语义固定: 0 正常 / 1 有异常或配置缺失 / 2 用法错误
+  * 提示语里的命令名自适应: 装成系统包就提示 synapse ..., 跑源码才提示 python3 synapse.py
+  * 测试 39 -> 48 项: 新增 CLI 端到端用例(--json 的 stdout 是否纯 JSON、
+    fix 不加 --apply 是否真的没写盘、缺配置的报错路径等)
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 16:25:00 +0800
+
 synapse (1.3.0) unstable; urgency=medium
 
   * 修工具链路误判: 判定 tool_call_broken 时曾用 "read" in text / 去引号后的

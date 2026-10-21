@@ -323,6 +323,111 @@ class TestTargetsOf(unittest.TestCase):
         self.assertTrue(synapse.read_dirty())
 
 
+class TestCli(unittest.TestCase):
+    """端到端跑 main(), 输出流注入 StringIO。
+
+    这一层以前完全没法测(cmd_* 直接 print + sys.exit),
+    结果"输出到底去了哪"这种最基本的事只能靠人肉看。它现在就钉住:
+      - --json 时 stdout 必须是纯 JSON(人类可读走 stderr)
+      - 退出码要能区分 正常/异常/配置缺失
+      - fix 不加 --apply 绝不写盘
+    """
+
+    def setUp(self):
+        import io
+        import json as _json
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "STATIONS", "REPORTS", "ISSUES", "PI_MODELS")}
+        h = self.tmp
+        synapse.HOME = h
+        synapse.CONFIG = os.path.join(h, "config.json")
+        synapse.STATIONS = os.path.join(h, "STATIONS.md")
+        synapse.REPORTS = os.path.join(h, "reports")
+        synapse.ISSUES = os.path.join(h, "issues.json")
+        synapse.PI_MODELS = os.path.join(h, "models.json")
+        self.json = _json
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.truncate(0); self.err.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def _config(self, targets):
+        synapse.save_json(synapse.CONFIG, {"targets": targets})
+
+    def test_version_exits_zero(self):
+        self.assertEqual(self._run("--version"), 0)
+
+    def test_missing_config_is_a_clean_error(self):
+        rc = self._run("check")
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.out.getvalue(), "")          # stdout 不留垃圾
+        self.assertIn("import-from-pi", self.err.getvalue())
+
+    def test_check_json_stdout_is_pure_json(self):
+        """只有配置错误的目标 → 不用联网就能验证 JSON 契约。"""
+        self._config({"bad": {"base_url": "https://a.invalid", "models": ["m"]}})
+        rc = self._run("check", "--json")
+        self.assertEqual(rc, 1)                            # 有异常项
+        data = self.json.loads(self.out.getvalue())        # 必须可解析, 没有表格混进来
+        self.assertEqual(data["results"][0]["kind"], "config_error")
+        self.assertIn("合计", self.err.getvalue())          # 人话走了 stderr
+
+    def test_check_without_json_prints_table_to_stdout(self):
+        self._config({"bad": {"base_url": "https://a.invalid", "models": ["m"]}})
+        self.assertEqual(self._run("check"), 1)
+        self.assertIn("配置不完整", self.out.getvalue())
+
+    def test_status_json_is_pure_json(self):
+        self._config({"t": {"base_url": "https://a.invalid", "api_key": "sk-1",
+                            "models": ["m"], "enabled": True}})
+        self.assertEqual(self._run("status", "--json"), 0)
+        data = self.json.loads(self.out.getvalue())
+        self.assertIn("t", data["targets"])
+
+    def test_issue_add_then_list(self):
+        self._config({})
+        self.assertEqual(self._run("issue", "add", "--target", "x", "--model", "m",
+                                   "--kind", "测试", "--symptom", "现象A"), 0)
+        self.assertEqual(self._run("issue", "list"), 0)
+        self.assertIn("现象A", self.out.getvalue())
+
+    def test_fix_without_apply_never_writes(self):
+        """--apply 是用户的明确授权; 不加就绝对不能碰 pi 的配置。"""
+        self._config({})
+        synapse.save_json(synapse.PI_MODELS, {"providers": {"p": {"apiKey": "sk-1",
+                       "baseUrl": "https://a.invalid",
+                       "models": [{"id": "m1", "reasoning": True}]}}})
+        before = open(synapse.PI_MODELS, encoding="utf-8").read()
+        self.assertEqual(self._run("fix", "--target", "p", "--model", "m1"), 0)
+        self.assertIn("[预览]", self.out.getvalue())
+        self.assertEqual(open(synapse.PI_MODELS, encoding="utf-8").read(), before)
+
+    def test_fix_apply_writes_and_backs_up(self):
+        self._config({})
+        synapse.save_json(synapse.PI_MODELS, {"providers": {"p": {"apiKey": "sk-1",
+                       "baseUrl": "https://a.invalid",
+                       "models": [{"id": "m1", "reasoning": True}]}}})
+        self.assertEqual(self._run("fix", "--target", "p", "--model", "m1",
+                                   "--apply"), 0)
+        after = self.json.load(open(synapse.PI_MODELS, encoding="utf-8"))
+        self.assertFalse(after["providers"]["p"]["models"][0]["reasoning"])
+        backups = [f for f in os.listdir(self.tmp) if "models.json" in f and "bak" in f]
+        self.assertTrue(backups, "必须留备份")
+
+    def test_unknown_target_in_fix_is_clean_error(self):
+        self._config({})
+        synapse.save_json(synapse.PI_MODELS, {"providers": {}})
+        self.assertEqual(self._run("fix", "--target", "nope", "--model", "m"), 1)
+        self.assertIn("没有 provider", self.err.getvalue())
+
+
 class TestStationsParser(unittest.TestCase):
     """STATIONS.md 解析: 只认 SYNC 区, pi: 引用不算 URL, #off 停用。"""
 

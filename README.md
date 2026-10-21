@@ -214,7 +214,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 39 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 48 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb
@@ -223,6 +223,11 @@ make dist      # 先跑测试，通过才出 deb
 测试钉住的是**判定层**——判错了会直接误导人去换 key 或改 pi 配置，所以
 `classify()` 的优先级（WAF > 无渠道 > 鉴权 > …）、工具调用判据、台账去重、
 自愈结单、`targets_of` 过滤与快照都有用例。
+
+CLI 层也已可测：`main(argv, out, err)` 返回退出码、输出流可注入，所以
+「`--json` 时 stdout 是否纯 JSON」「`fix` 不加 `--apply` 是否真的没写盘」
+这类以前只能人肉看的事，现在是断言。退出码：`0` 正常 / `1` 有异常或配置缺失 /
+`2` 用法错误。
 
 CI（`.github/workflows/ci.yml`）在 py3.9–3.13 上跑测试，并检查打出来的 deb
 里**不含任何数据/密钥文件**。
