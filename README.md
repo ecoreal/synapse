@@ -79,6 +79,24 @@ python3 synapse.py status          # 一览: 目标清单 + 长跑失败统计 +
 | 让 pi 看图（read 工具） | `check --vision` | `toolResult` 形态也要 ✅ |
 | 长跑稳定性 | `watch` + `status` | 连败 ≥2 轮就该停用 |
 
+### 长期稳定性（该不该把这个站放进长跑）
+
+```bash
+python3 synapse.py uptime --days 7
+```
+
+```
+  目标/模型                                    样本     成功率     最长连败     p50  判定
+  hyb/deepseek-v4.1-flash                  17    0.0%       17       -  不建议
+                                         └ 主要失败: server_error×12, auth_failed×4
+  tierflow/tierflow                        20  100.0%        0    1.9s  稳
+```
+
+单轮检查只能告诉你"此刻通不通"，`uptime` 把历史报告聚合成成功率。
+两条底线：**样本少于 5 次拒绝下结论**（2 次成功不是 100% 稳）；
+`internal_error`（Synapse 自己的 bug）、`config_error`（配置没写全）和
+`partial` 定点体检**都不计入可用率** —— 它们会让一个健康的站看起来很差。
+
 `check` 每轮会自己讲**趋势**：某个 `目标/模型` 连败到第 2 轮时打一行
 `[趋势] ... 连续 2 轮失败 → 不是偶发抖动`，恢复时打 `[趋势] ... 已恢复`。
 同一件事只报一次（不会每轮重复喊），所以单轮抖动和持续性故障一眼可分。
@@ -92,6 +110,11 @@ python3 synapse.py check -v
 # 机读模式：只出一份 JSON（time/summary/results），方便接别的脚本
 # 人类可读的表格会自动走 stderr，所以管道里只剩纯 JSON
 python3 synapse.py check --json | jq '.summary'
+
+# 长期稳定性: 过去 N 天每个站到底稳不稳(样本不足会拒绝下结论)
+python3 synapse.py uptime                    # 默认看最近 7 天
+python3 synapse.py uptime --days 30
+python3 synapse.py uptime --target hyb --json | jq '.targets[0]'
 
 # 报告回收: reports/ 每轮一个文件会无限长，默认只预览，--apply 才真删
 python3 synapse.py prune                       # 默认保留每类最新 200 个、且只删 7 天前的
@@ -235,7 +258,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 104 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 116 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

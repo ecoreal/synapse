@@ -1,3 +1,14 @@
+synapse (1.9.0) unstable; urgency=medium
+
+  * 新增 uptime: 从 reports/ 的历史报告聚合各站成功率/最长连败/p50/主要失败原因
+    * 样本 < 5 判"样本不足"并拒绝下结论(2 次成功不是 100% 稳)
+    * partial 定点体检、internal_error、config_error 一律排除在可用率之外
+      (定点体检是"出问题才去查", 算进去必然压低可用率; 内部错误是我们自己的 bug)
+  * "哪些判定算成功"的名单从三处重复定义收敛为单一 _OK_KINDS
+  * 测试 104 -> 116 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 18:40:00 +0800
+
 synapse (1.8.0) unstable; urgency=medium
 
   * 新增 prune: 回收历史报告(默认预览, --apply 才删; latest.json 永不删)

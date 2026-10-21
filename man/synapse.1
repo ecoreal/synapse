@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.8.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.9.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -57,6 +57,16 @@ config.json 的权限(内含明文 key, 非 0600 会警告)、key_from_pi 引用
 Python 版本。
 出现故障项返回 1; 只有警告项返回 0。
 \-\-json 时输出 {time, checks:[{level,name,detail,hint}], summary}。
+.TP
+.B uptime
+历史稳定性: 把 reports/ 里过去每一轮的体检结果聚合起来, 按 目标/模型 算
+成功率、最长连败、p50 延迟和主要失败原因。单轮检查回答不了"这个站值不值得
+放进 pi 长跑", 这个能。
+\-\-days N 统计窗口(默认 7, 0 = 全部); \-\-target/\-\-model 过滤; \-\-json。
+样本少于 5 次时判定为"样本不足"并拒绝下结论(2 次成功不是 100% 稳)。
+三项刻意排除在成功率之外: partial 定点体检(出问题才去查, 会压低可用率)、
+internal_error(Synapse 自己的 bug, 不是站的问题)、config_error(配置没写全)。
+\-\-json 时输出 {days, window, reports_used, targets:[...], summary}。
 .TP
 .B prune
 回收历史报告(默认只预览, 加 \-\-apply 才真删)。

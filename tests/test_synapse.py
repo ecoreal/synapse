@@ -422,6 +422,141 @@ class TestStatusFreshness(unittest.TestCase):
         self.assertIn("最近一次体检", self.out.getvalue())
 
 
+class TestUptime(unittest.TestCase):
+    """历史稳定性: reports/ 里躺着过去每一轮的完整结果, 但从没人用。
+
+    它要回答的是用户的真问题: "这个站值不值得放进 pi 长跑"。
+    两条底线:
+      - 样本太少不许下结论(不许把 2 次成功说成 100% 稳)
+      - internal_error(我们自己的 bug) 和 config_error 绝不能算进"站的可用率"
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in ("HOME", "REPORTS", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def _report(self, idx, kinds, target="t", model="m", partial=False, days_ago=0, test="basic"):
+        """写一份报告: kinds 是这一轮各行的判定。"""
+        import datetime as dt
+        when = dt.datetime.now() - dt.timedelta(days=days_ago, minutes=idx)
+        name = "check-" + when.strftime("%Y%m%d-%H%M%S") + f"-{idx}.json"
+        rows = [{"target": target, "model": model, "kind": k, "http": 200 if k.startswith("ok") else 500,
+                 "latency_ms": 100, "test": test, "snippet": ""} for k in kinds]
+        synapse.save_json(os.path.join(synapse.REPORTS, name),
+                          {"time": when.strftime("%Y-%m-%d %H:%M:%S"),
+                           "summary": {"total": len(rows)}, "results": rows,
+                           "partial": partial})
+
+    def _json(self, *argv):
+        self._run(*(argv + ("--json",)))
+        import json as _j
+        return _j.loads(self.out.getvalue())
+
+    def test_success_rate_over_rounds(self):
+        for i in range(10):
+            self._report(i, ["ok"] if i < 8 else ["server_error"])
+        d = self._json("uptime", "--days", "7")
+        t = d["targets"][0]
+        self.assertEqual((t["target"], t["model"]), ("t", "m"))
+        self.assertEqual(t["samples"], 10)
+        self.assertAlmostEqual(t["ok_rate"], 0.8, places=3)
+
+    def test_small_sample_refuses_to_conclude(self):
+        for i in range(3):
+            self._report(i, ["ok"])
+        t = self._json("uptime", "--days", "7")["targets"][0]
+        self.assertEqual(t["ok_rate"], 1.0)
+        self.assertEqual(t["verdict"], "样本不足")
+        self.assertIn("别下结论", t["advice"])
+
+    def test_internal_error_never_counts_as_station_downtime(self):
+        for i in range(5):
+            self._report(i, ["ok"])
+        for i in range(5, 8):
+            self._report(i, ["internal_error"])
+        t = self._json("uptime", "--days", "7")["targets"][0]
+        self.assertEqual(t["samples"], 5, "内部错误不是站的样本")
+        self.assertEqual(t["ok_rate"], 1.0)
+        self.assertEqual(t["internal_errors"], 3)
+
+    def test_config_error_never_counts_as_station_downtime(self):
+        for i in range(5):
+            self._report(i, ["ok"])
+        self._report(9, ["config_error"])
+        t = self._json("uptime", "--days", "7")["targets"][0]
+        self.assertEqual(t["samples"], 5)
+        self.assertEqual(t["config_errors"], 1)
+
+    def test_partial_spot_checks_are_excluded(self):
+        """定点体检是"出问题才去查", 混进来会把可用率压低。"""
+        for i in range(5):
+            self._report(i, ["ok"])
+        for i in range(5, 10):
+            self._report(i, ["waf_blocked"], partial=True)
+        t = self._json("uptime", "--days", "7")["targets"][0]
+        self.assertEqual(t["samples"], 5)
+        self.assertEqual(t["ok_rate"], 1.0)
+
+    def test_window_excludes_old_reports(self):
+        for i in range(5):
+            self._report(i, ["ok"], days_ago=0)
+        for i in range(5, 10):
+            self._report(i, ["server_error"], days_ago=30)
+        t = self._json("uptime", "--days", "7")["targets"][0]
+        self.assertEqual(t["samples"], 5)
+        self.assertEqual(t["ok_rate"], 1.0)
+
+    def test_non_basic_tests_do_not_pollute_stability(self):
+        for i in range(5):
+            self._report(i, ["ok"])
+        for i in range(5, 10):
+            self._report(i, ["waf_blocked"], test="tools")
+        t = self._json("uptime", "--days", "7")["targets"][0]
+        self.assertEqual(t["samples"], 5)
+
+    def test_longest_failing_streak(self):
+        for i, k in enumerate(["ok", "server_error", "server_error", "ok",
+                               "timeout", "timeout", "timeout", "ok"]):
+            self._report(i, [k])
+        t = self._json("uptime", "--days", "7")["targets"][0]
+        self.assertEqual(t["longest_streak"], 3)
+
+    def test_top_failure_reasons(self):
+        for i, k in enumerate(["ok", "waf_blocked", "waf_blocked", "waf_blocked", "timeout"]):
+            self._report(i, [k])
+        t = self._json("uptime", "--days", "7")["targets"][0]
+        self.assertEqual(t["reasons"][0], {"kind": "waf_blocked", "count": 3})
+
+    def test_verdict_thresholds(self):
+        self.assertEqual(synapse._uptime_verdict(10, 1.0)[0], "稳")
+        self.assertEqual(synapse._uptime_verdict(10, 0.85)[0], "勉强")
+        self.assertEqual(synapse._uptime_verdict(10, 0.5)[0], "不建议")
+
+    def test_no_reports_is_not_an_error(self):
+        self.assertEqual(self._run("uptime"), 0)
+
+    def test_human_output_names_the_verdict(self):
+        for i in range(10):
+            self._report(i, ["ok"])
+        self._run("uptime")
+        self.assertIn("稳", self.out.getvalue())
+
+
 class TestEmptySelection(unittest.TestCase):
     """筛选条件一个都没选中时, 不能输出"合计 0 项"然后退出 0。
 

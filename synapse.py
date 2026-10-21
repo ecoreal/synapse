@@ -40,7 +40,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 
 def _init_home():
@@ -310,6 +310,11 @@ class Ctx:
 # ---------------------------------------------------------------- commands
 
 
+# "这一行算成功"的唯一名单。之前它被复制成三份(_outage_track / _auto_recover_from_rows
+# / cmd_check 各写一遍), 改判定种类时必然漏改其中一处。
+_OK_KINDS = ("ok", "ok_truncated", "ok_nonjson", "ok_tool_use", "cache_passthrough")
+
+
 def _config_error_row(name, reason):
     """配置不完整的目标也占一行, 显式报错, 而不是默默跳过。"""
     return {"target": name, "model": "-", "test": "basic", "kind": "config_error",
@@ -470,7 +475,7 @@ def _streak_transitions(prev, cur, min_streak=2):
 
 def _outage_track(rows):
     """累计每个 目标||模型 的成功/失败轮次和连续失败次数(.outage.json), 供 watch 长跑追踪时段性故障。"""
-    GOOD = ("ok", "ok_truncated", "ok_nonjson", "ok_tool_use", "cache_passthrough")
+    GOOD = _OK_KINDS
     snap = load_json(os.path.join(HOME, ".outage.json"), {}) or {}
     for r in rows:
         if r["kind"] in ("config_error", "internal_error"):
@@ -509,7 +514,7 @@ def _auto_recover_from_rows(rows, db=None, say=None):
     不能证明整体好了)。第一次恢复只记一笔; 连续两轮都恢复则自动把 status
     改成 fixed —— 台账不会越堆越脏, 而手工单(看重人工判断)永不被碰。
     """
-    GOOD = ("ok", "ok_truncated", "ok_nonjson", "ok_tool_use", "cache_passthrough")
+    GOOD = _OK_KINDS
     say = say or print
     db = db if db is not None else load_issues()
     ok_pairs = {(r["target"], r["model"]) for r in rows
@@ -595,8 +600,7 @@ def cmd_check(args, ctx):
             f"{r['latency_ms']}ms  {('HTTP ' + str(r['http'])) if r['http'] else ''}")
         if args.verbose and r["snippet"]:
             ctx.say(f"{'':12}└─ {r['snippet']}")
-    ok_kinds = ("ok", "ok_truncated", "ok_nonjson", "ok_tool_use", "cache_passthrough")
-    bad = [r for r in rows if r["kind"] not in ok_kinds]
+    bad = [r for r in rows if r["kind"] not in _OK_KINDS]
     ctx.say(f"\n合计 {len(rows)} 项, 异常 {len(bad)} 项, 耗时 {time.time()-t0:.1f}s")
 
     # 提醒: 一周期内反复失败的目标 → 建议临时禁用(不自动改配置)
@@ -1033,6 +1037,148 @@ def _report_groups():
     for g in groups.values():
         g.sort(reverse=True)
     return groups
+
+
+# ---------------------------------------------------------------- 历史稳定性
+# reports/check-*.json 是过去每一轮的完整结果。把它们聚合起来才能回答
+# "这个站值不值得放进 pi 长跑" —— 单轮检查永远回答不了这个问题。
+_TS_IN_NAME_RE = re.compile(r"^(?P<prefix>[a-z]+)-(?P<ts>\d{8}-\d{6})")
+
+
+def _report_entries(prefix="check"):
+    """列出某前缀的报告, 新的在前。文件名里的时间戳比 mtime 可靠(拷贝会改 mtime)。"""
+    try:
+        names = os.listdir(REPORTS)
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        m = _TS_IN_NAME_RE.match(n)
+        if not m or m.group("prefix") != prefix:
+            continue
+        try:
+            ts = datetime.datetime.strptime(m.group("ts"), "%Y%m%d-%H%M%S")
+        except ValueError:
+            continue                       # 名字被改过之类, 跳过而不是崩
+        out.append((ts, os.path.join(REPORTS, n)))
+    out.sort(key=lambda x: x[0], reverse=True)
+    return out
+
+
+def _uptime_verdict(samples, ok_rate):
+    """给判定, 但样本不够就**拒绝**下结论。2 次成功不是"100% 稳"。"""
+    if samples < 5:
+        return "样本不足", f"只有 {samples} 次样本, 别下结论 —— 多跑几轮再看"
+    if ok_rate >= 0.95:
+        return "稳", "可以放进 pi 长跑"
+    if ok_rate >= 0.80:
+        return "勉强", "偶发失败, 关键任务建议配一个备用站"
+    return "不建议", "失败率太高, 不适合长跑; 建议换站或禁用"
+
+
+def _uptime_stats(days=7.0, target=None, model=None):
+    """聚合窗口内所有**全量**体检报告, 按 目标/模型 算稳定性。
+
+    刻意排除的部分(否则会把"站的可用率"算错):
+      - partial 定点体检: 那是"出问题才去查", 混进来必然压低可用率
+      - internal_error: 我们自己的 bug, 不是站的问题
+      - config_error: 配置没写全, 站还没被测到
+      - 非 basic 测试项(--tools/--cache 等): 它们回答的是别的问题
+    """
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=days) if days > 0 else None
+    entries = [e for e in _report_entries("check") if cutoff is None or e[0] >= cutoff]
+    acc = {}
+    used = 0
+    for _ts, path in reversed(entries):          # 按时间正序, 便于算连败
+        d = load_json(path, {}) or {}
+        if d.get("partial"):
+            continue
+        used += 1
+        for r in d.get("results") or []:
+            if r.get("test") not in (None, "basic"):
+                continue
+            t, m = r.get("target") or "?", r.get("model") or "?"
+            if target and t != target:
+                continue
+            if model and m != model:
+                continue
+            kind = r.get("kind") or "?"
+            a = acc.setdefault((t, m), {"samples": 0, "oks": 0, "kinds": {},
+                                        "lat": [], "streak": 0, "longest": 0,
+                                        "last_kind": kind, "internal": 0, "cfg": 0})
+            a["last_kind"] = kind
+            if kind == "internal_error":
+                a["internal"] += 1
+                continue
+            if kind == "config_error":
+                a["cfg"] += 1
+                continue
+            a["samples"] += 1
+            if kind in _OK_KINDS:
+                a["oks"] += 1
+                a["streak"] = 0
+                if r.get("latency_ms"):
+                    a["lat"].append(r["latency_ms"])
+            else:
+                a["kinds"][kind] = a["kinds"].get(kind, 0) + 1
+                a["streak"] += 1
+                a["longest"] = max(a["longest"], a["streak"])
+
+    rows = []
+    for (t, m), a in acc.items():
+        n = a["samples"]
+        rate = (a["oks"] / n) if n else 0.0
+        verdict, advice = _uptime_verdict(n, rate)
+        lat = sorted(a["lat"])
+        rows.append({
+            "target": t, "model": m, "samples": n, "oks": a["oks"], "fails": n - a["oks"],
+            "ok_rate": round(rate, 4), "longest_streak": a["longest"],
+            "last_kind": a["last_kind"],
+            "p50_latency_ms": lat[len(lat) // 2] if lat else None,
+            "avg_latency_ms": int(sum(lat) / len(lat)) if lat else None,
+            "reasons": [{"kind": k, "count": c} for k, c in
+                        sorted(a["kinds"].items(), key=lambda kv: -kv[1])[:3]],
+            "internal_errors": a["internal"], "config_errors": a["cfg"],
+            "verdict": verdict, "advice": advice,
+        })
+    # 最该看的排前面: 样本够且成功率低的优先, 样本不足沉底
+    rows.sort(key=lambda r: (r["samples"] < 5, r["ok_rate"], -r["samples"]))
+    return rows, used
+
+
+def cmd_uptime(args, ctx):
+    rows, used = _uptime_stats(args.days, getattr(args, "target", None),
+                               getattr(args, "model", None))
+    window = f"最近 {args.days:g} 天" if args.days > 0 else "全部历史"
+    if ctx.as_json:
+        ctx.json({"days": args.days, "window": window, "reports_used": used,
+                  "targets": rows,
+                  "summary": {"targets": len(rows), "reports_used": used}})
+        return 0
+    if not rows:
+        ctx.say(f"[i] {window}里没有可用的全量体检报告(共 {used} 份)")
+        ctx.say(f"    先跑一次全量体检: {CMD} check")
+        return 0
+    ctx.say(f"\n=== Synapse 历史稳定性  {window} / {used} 份全量报告 ===")
+    ctx.say(f"  {'目标/模型':<38} {'样本':>4} {'成功率':>7} {'最长连败':>8} {'p50':>7}  判定")
+    for r in rows:
+        name = f"{r['target']}/{r['model']}"
+        if len(name) > 38:
+            name = name[:37] + "…"
+        p50 = f"{r['p50_latency_ms'] / 1000:.1f}s" if r["p50_latency_ms"] else "-"
+        ctx.say(f"  {name:<38} {r['samples']:>4} {r['ok_rate'] * 100:>6.1f}% "
+                f"{r['longest_streak']:>8} {p50:>7}  {r['verdict']}")
+        if r["reasons"]:
+            why = ", ".join(f"{x['kind']}×{x['count']}" for x in r["reasons"])
+            ctx.say(f"  {'':<38} └ 主要失败: {why}")
+        if r["internal_errors"]:
+            ctx.say(f"  {'':<38} └ 🐞 另有 {r['internal_errors']} 次 Synapse 内部错误"
+                    f"(不算站的账)")
+    bad = [r for r in rows if r["verdict"] in ("不建议", "勉强")]
+    if bad:
+        ctx.say(f"\n建议关注: {', '.join(r['target'] + '/' + r['model'] for r in bad[:5])}")
+    ctx.say(f"\n(i) 历史深度受 {CMD} prune 影响: 默认每类保留 200 份")
+    return 0
 
 
 def cmd_prune(args, ctx):
@@ -1605,6 +1751,13 @@ def main(argv=None, out=None, err=None):
     p.add_argument("--log", action="store_true",
                    help="把最近一次体检摘要回写到 STATIONS.md 日志区")
     p.set_defaults(fn=cmd_sync_stations)
+
+    p = sub.add_parser("uptime", help="历史稳定性: 从过去的体检报告算各站成功率")
+    p.add_argument("--days", type=float, default=7.0, help="统计窗口天数(默认 7, 0=全部)")
+    p.add_argument("--target", help="只看某个目标")
+    p.add_argument("--model", help="只看某个模型")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.set_defaults(fn=cmd_uptime)
 
     p = sub.add_parser("prune", help="清理历史报告(默认只预览, --apply 才真删)")
     p.add_argument("--keep", type=int, default=200,
