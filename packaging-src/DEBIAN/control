@@ -1,5 +1,5 @@
 Package: synapse
-Version: 1.27.0
+Version: 1.28.0
 Section: utils
 Priority: optional
 Architecture: all

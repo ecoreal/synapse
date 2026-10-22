@@ -11,6 +11,7 @@ Synapse — pi 模型连通性定期检查 / 诊断 / 配置修复
 import argparse
 import concurrent.futures as futures
 import datetime
+import difflib
 import http.client
 import json
 import os
@@ -42,7 +43,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.27.0"
+__version__ = "1.28.0"
 
 
 def _init_home():
@@ -483,7 +484,8 @@ def _streak_hints(min_streak=2):
         if st.get("streak", 0) >= min_streak:
             t, m = key.split("||", 1)
             hints.append(f"[!] {t}/{m} 已连续 {st['streak']} 轮失败(最近 {st.get('last_kind')})"
-                         f" → 可考虑临时禁用: 在 config.json 把 {t} 的 enabled 改 false")
+                         f" → 想先停掉它: {CMD} disable {t}"
+                         f"  (改的是我们自己的 config.json, 会先备份; 恢复: {CMD} enable {t})")
     return hints
 
 
@@ -2589,6 +2591,66 @@ def _ensure_units():
     return wrote
 
 
+def _toggle_target(args, ctx, enabled):
+    """只翻转一个目标的 enabled, 其它字段一个字都不动。
+
+    以前体检建议直接写在文案里: "在 config.json 把 X 的 enabled 改 false"。
+    那是一份 0600 的 1.6KB JSON、9 个站, 逗号错一个整份配置就读不出来,
+    而且手改不留备份 —— 而我们自己在 sync-stations 里刚警告过"别手改 config"。
+    """
+    want = "enabled" if enabled else "disabled"
+    name = args.target
+    if not os.path.exists(CONFIG):
+        ctx.die(f"[!] 缺少 {CONFIG}, 先运行: {CMD} import-from-pi")
+    cfg = _read_user_json(CONFIG, None)
+    targets = (cfg or {}).get("targets") if isinstance(cfg, dict) else None
+    if not targets:
+        ctx.die(f"[!] {CONFIG} 里没有任何目标, 先运行: {CMD} sync-stations 或 {CMD} import-from-pi")
+    if name not in targets:
+        close = difflib.get_close_matches(name, sorted(targets), n=3, cutoff=0.5)
+        tip = f"; 你是不是想: {', '.join(close)}" if close else ""
+        ctx.die(f"[!] 配置里没有目标 {name}{tip}\n"
+                f"    现有: {', '.join(sorted(targets))}")
+    cur = bool(targets[name].get("enabled", True))
+    if cur == bool(enabled):
+        ctx.say(f"[i] {name} 本来就是 {want}, 什么都没改")
+        if ctx.as_json:
+            ctx.json({"target": name, "changed": False, "enabled": cur})
+        return 0
+    if getattr(args, "dry_run", False):
+        ctx.say(f"[预览] 会把 {name} 标成 {want} (配置未改动)")
+        ctx.say(f"    确认: {CMD} {'enable' if enabled else 'disable'} {name}")
+        if ctx.as_json:
+            ctx.json({"target": name, "changed": False, "dry_run": True,
+                      "would_set_enabled": bool(enabled)})
+        return 0
+    backup = f"{CONFIG}.bak.{time.strftime('%Y%m%d-%H%M%S')}"
+    try:
+        shutil.copy2(CONFIG, backup)
+        chmod_private(backup)
+    except OSError as e:
+        ctx.die(f"[!] 备份失败, 不敢改配置: {e}")
+    targets[name]["enabled"] = bool(enabled)
+    save_json(CONFIG, cfg)
+    if ctx.as_json:
+        ctx.json({"target": name, "changed": True, "enabled": bool(enabled),
+                  "backup": backup})
+        return 0
+    ctx.say(f"[完成] {name} → {want}")
+    ctx.say(f"    备份: {backup}")
+    other = "enable" if not enabled else "disable"
+    ctx.say(f"    改回来: {CMD} {other} {name}")
+    return 0
+
+
+def cmd_disable(args, ctx):
+    return _toggle_target(args, ctx, False)
+
+
+def cmd_enable(args, ctx):
+    return _toggle_target(args, ctx, True)
+
+
 def cmd_timer(args, ctx):
     """systemd 用户定时器管理。
     若系统未装 systemd 用户会话(容器/裸 shell), 退回 crontab。"""
@@ -2817,6 +2879,18 @@ def build_parser():
     p.add_argument("--default", default=None, help="设为默认目标的provider名")
     p.add_argument("--edit-hint", action="store_true")
     p.set_defaults(fn=cmd_import)
+
+    p = sub.add_parser("disable", help="临时停掉一个目标(只改 enabled, 先备份)")
+    p.add_argument("target")
+    p.add_argument("--dry-run", action="store_true", help="只预览, 不写配置")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.set_defaults(fn=cmd_disable)
+
+    p = sub.add_parser("enable", help="把停掉的目标重新启用")
+    p.add_argument("target")
+    p.add_argument("--dry-run", action="store_true", help="只预览, 不写配置")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.set_defaults(fn=cmd_enable)
 
     p = sub.add_parser("cron", help="用 crontab 做定期检查")
     p.add_argument("--schedule", default="0 * * * *")

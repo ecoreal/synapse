@@ -6,9 +6,11 @@
 不需要网络, 不发任何请求。
 """
 import atexit
+import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -1822,6 +1824,115 @@ class TestSyncNeverWritesEmptyConfig(unittest.TestCase):
         self.out.seek(0); self.out.truncate(0)
         synapse.main(["sync-stations"], out=self.out, err=self.err)
         self.assertNotIn("站数: 0 → 0", self.out.getvalue())
+class TestEnableDisable(unittest.TestCase):
+    """工具一直在建议"在 config.json 把 X 的 enabled 改 false", 却没有这个命令。
+
+    手改的代价很具体: 1600 字节的 0600 JSON、9 个站、逗号/引号错一个就整份
+    配置读不出来(check 直接 rc=2), 而且手改不留备份。而我们自己在
+    sync-stations 里刚警告过"补进 STATIONS.md 而不是手改 config"。
+    工具叫你做的事, 要么有命令, 要么别叫。
+    """
+
+    def setUp(self):
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD")}
+        self.tmp = tempfile.mkdtemp()
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        synapse.save_json(synapse.CONFIG, {"targets": {
+            "good": {"enabled": True, "models": ["m1"], "default": True},
+            "bad": {"enabled": True, "models": ["m2"],
+                    "base_url": "https://bad.example/v1", "api_key": "sk-hand"},
+        }})
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        rc = synapse.main(argv, out=out, err=err)
+        return rc, out.getvalue() + err.getvalue()
+
+    def _cfg(self):
+        return synapse._read_user_json(synapse.CONFIG, {})
+
+    def test_disable_only_flips_enabled(self):
+        rc, text = self._run(["disable", "bad"])
+        self.assertEqual(rc, 0, text)
+        cfg = self._cfg()
+        self.assertFalse(cfg["targets"]["bad"]["enabled"])
+        # 手写的字段必须原样在: 否则 disable 一次就把站点信息抹了
+        self.assertEqual(cfg["targets"]["bad"]["base_url"], "https://bad.example/v1")
+        self.assertEqual(cfg["targets"]["bad"]["api_key"], "sk-hand")
+        self.assertTrue(cfg["targets"]["good"]["enabled"])
+        self.assertIn("bad", text)
+
+    def test_disable_backs_up_first(self):
+        before = open(synapse.CONFIG, encoding="utf-8").read()
+        rc, _ = self._run(["disable", "bad"])
+        self.assertEqual(rc, 0)
+        baks = [n for n in os.listdir(self.tmp) if n.startswith("config.json.bak.")]
+        self.assertEqual(len(baks), 1, "改配置前必须先备份")
+        path = os.path.join(self.tmp, baks[0])
+        self.assertEqual(open(path, encoding="utf-8").read(), before)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600,
+                         "备份里有 api_key, 必须 0600")
+
+    def test_unknown_target_is_refused_with_a_suggestion(self):
+        before = open(synapse.CONFIG, encoding="utf-8").read()
+        rc, text = self._run(["disable", "godo"])       # 手滑
+        self.assertEqual(rc, 1)
+        self.assertEqual(open(synapse.CONFIG, encoding="utf-8").read(), before)
+        self.assertIn("good", text)                      # 提示最像的那个
+
+    def test_second_disable_says_nothing_changed(self):
+        self._run(["disable", "bad"])
+        baks = [n for n in os.listdir(self.tmp) if n.startswith("config.json.bak.")]
+        rc, text = self._run(["disable", "bad"])
+        self.assertEqual(rc, 0)
+        self.assertIn("本来就是", text)
+        self.assertEqual(len([n for n in os.listdir(self.tmp)
+                              if n.startswith("config.json.bak.")]), len(baks),
+                         "没变化就不该再写一份备份")
+
+    def test_enable_round_trips(self):
+        self._run(["disable", "bad"])
+        rc, _ = self._run(["enable", "bad"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(self._cfg()["targets"]["bad"]["enabled"])
+
+    def test_dry_run_does_not_touch_the_file(self):
+        before = open(synapse.CONFIG, encoding="utf-8").read()
+        rc, text = self._run(["disable", "bad", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(synapse.CONFIG, encoding="utf-8").read(), before)
+        self.assertIn("会", text)
+
+    def test_dry_run_json_goes_to_stdout_only(self):
+        """--json 契约: stdout 只有 JSON, 人的字节去 stderr。"""
+        out, err = io.StringIO(), io.StringIO()
+        rc = synapse.main(["disable", "bad", "--dry-run", "--json"], out=out, err=err)
+        self.assertEqual(rc, 0)
+        payload = json.loads(out.getvalue())          # stdout 必须是纯 JSON
+        self.assertTrue(payload["dry_run"])
+        self.assertFalse(payload["would_set_enabled"])
+        self.assertIn("预览", err.getvalue())
+
+    def test_streak_advice_points_at_the_command_not_at_hand_editing(self):
+        """建议文案必须给出命令 —— 否则又是在教人手改 0600 的 JSON。"""
+        synapse.save_json(os.path.join(self.tmp, ".outage.json"), {
+            "kool||m2": {"streak": 3, "last_kind": "server_error"}})
+        hints = synapse._streak_hints()
+        self.assertTrue(hints)
+        self.assertIn("synapse disable kool", hints[0])
+        self.assertNotIn("enabled 改 false", hints[0])
+
 
 class TestTimerUnitStaleness(unittest.TestCase):
     """timer on 写出的单元会把可执行文件路径烧死在里面, 而 _ensure_units 见到

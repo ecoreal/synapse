@@ -101,6 +101,12 @@ synapse doctor --fix --apply    # 真改，然后复查
 `sk-`/`Bearer`/`api_key` 字段一律遮蔽，但保留 `401 invalid api key` 这类足以定位问题的字眼。
 报告与仪表盘统一 0600；历史文件由 `doctor` 扫描（含疑似密钥或权限过宽都会警告）。
 
+## `disable` / `enable`：别让用户手改配置
+
+体检的提示曾经是「在 config.json 把 X 的 enabled 改 false」。那是一份 0600 的 1.6KB JSON、9 个站，逗号错一个整份配置就读不出来（`check` 直接 `rc=2`），而且手改不留备份——而我们自己在 `sync-stations` 里刚警告过「别手改 config」。
+
+现在：`synapse disable X` / `synapse enable X`。只翻转那一个 `enabled`，其它字段（手写的 `base_url`、内联 `api_key`）一个字不动；写前备份 `config.json.bak.<ts>`（0600），备份失败就不改；目标名不存在时拒绝并给出最像的名字；已经是目标状态时说「本来就是，什么都没改」且不写备份。`--dry-run` 预览，`--json` 输出机器可读结果。
+
 ## 定时器单元里烧死的路径
 
 `timer on` 会把可执行文件路径写进 `ExecStart`，而 `_ensure_units` 见到「单元已存在」就 `continue` —— **永不刷新**。
@@ -426,7 +432,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 209 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 217 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

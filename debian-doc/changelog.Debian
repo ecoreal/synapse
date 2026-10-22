@@ -1,3 +1,15 @@
+synapse (1.28.0) unstable; urgency=medium
+
+  * 新增 disable/enable: 不再教用户手改 0600 的 config.json
+    - 体检提示原为"在 config.json 把 X 的 enabled 改 false", 而手改一份
+      1.6KB JSON 容易写坏(整份读不出, check rc=2)且不留备份
+    - 只翻转 enabled, 手写字段原样保留; 写前 0600 备份, 备份失败即拒改
+    - 目标名不存在时拒绝并给最像的名字; 已是目标状态则明说未改动
+    - --dry-run 预览 / --json 机器可读
+  * 新测试 8 项; 测试 209 -> 217
+
+ -- ec <ec@localhost>  Thu, 22 Oct 2026 17:20:00 +0800
+
 synapse (1.27.0) unstable; urgency=medium
 
   * 定时器单元路径不再烧死在旧位置

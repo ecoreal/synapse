@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.27.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.28.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -59,6 +59,17 @@ list 支持 \-\-json 输出 {total, open, filter, issues}。
 .ad l
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
 .TP
+.SH disable / enable: 别让用户手改配置
+体检的提示曾经是"在 config.json 把 X 的 enabled 改 false"。那是一份 \fB0600\fR 的
+1.6KB JSON、9 个站, 逗号错一个整份配置就读不出来(\fBcheck\fR 直接 \fBrc=2\fR),
+而且手改不留备份 —— 而我们自己在 \fBsync\-stations\fR 里刚警告过"别手改 config"。
+.PP
+现在: \fBsynapse disable X\fR / \fBsynapse enable X\fR。只翻转那一个
+\fBenabled\fR, 其它字段(手写的 \fBbase\u\_url\fR/内联 \fBapi\_key\fR)一个字不动;
+写前备份 \fBconfig.json.bak.<ts>\fR(0600), 备份失败就不改; 目标名不存在时拒绝
+并给出最像的名字; 已经是目标状态时说"本来就是, 什么都没改"且不写备份。
+\fB\-\-dry\-run\fR 预览, \fB\-\-json\fR 输出机器可读结果。
+.PP
 .SH 定时器单元里烧死的路径
 \fBtimer on\fR 会把可执行文件路径写进 \fBExecStart\fR, 而
 \fB\_ensure\_units\fR 见到"单元已存在"就 \fBcontinue\fR —— \fB永不刷新\fR。
