@@ -101,6 +101,14 @@ synapse doctor --fix --apply    # 真改，然后复查
 `sk-`/`Bearer`/`api_key` 字段一律遮蔽，但保留 `401 invalid api key` 这类足以定位问题的字眼。
 报告与仪表盘统一 0600；历史文件由 `doctor` 扫描（含疑似密钥或权限过宽都会警告）。
 
+## 空清单不可写
+
+`sync-stations` 有两条通向空配置的路：解析到 0 行（直接报错），以及**每一行都被跳过**（缺 `base_url` 或 `api_key`）。后一条曾经照样写盘——「站数: 0 → 0」，退出码 0，一份能用的配置被空清单覆盖。
+
+监控器最坏的失败不是报错，是悄悄什么都不监控了。现在后者被拒绝，并逐个点名被跳过的行；已存在的 `config.json` 一个字都不动。
+
+顺带修掉一个测试隔离漏洞：`parse_stations` / `stations_to_config` 曾用 `path=STATIONS` 作默认参数，而默认参数在 `def` 时就绑定——monkeypatch `synapse.STATIONS` 不生效，测试会去读**真实用户**的 `STATIONS.md`。现在默认值在调用时解析。
+
 ## `import-from-pi` 只重建「目标清单」
 
 `import-from-pi` 也整体重写 `config.json`，但它的重建范围是**从 pi 来的目标清单**，不是整份配置：
@@ -404,7 +412,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 197 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 200 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

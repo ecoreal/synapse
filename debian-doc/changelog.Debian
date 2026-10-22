@@ -1,3 +1,16 @@
+synapse (1.25.0) unstable; urgency=medium
+
+  * sync-stations: 拒绝用空清单覆盖 config.json
+    - "每一行都被跳过"(缺 base_url/api_key) 时旧实现照样写盘, 站数 0 → 0,
+      退出码 0, 一份能用的配置被空清单覆盖 → 监控静默停止
+    - 现在报错并逐个点名被跳过的行, 已有配置不动
+  * 修复测试隔离漏洞: parse_stations/stations_to_config 的 path=STATIONS
+    默认参数在 def 时绑定, monkeypatch synapse.STATIONS 不生效 ——
+    测试实际读的是真实用户的 ~/.config/synapse/STATIONS.md
+  * 新测试 3 项(拒绝空清单/不打印 0→0/读取当前配置的文件); 测试 197 -> 200
+
+ -- ec <ec@localhost>  Thu, 22 Oct 2026 13:40:00 +0800
+
 synapse (1.24.0) unstable; urgency=medium
 
   * import-from-pi: 保留手写的 base_url / 内联 api_key / enabled=false

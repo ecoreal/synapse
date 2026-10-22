@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.24.0"
+__version__ = "1.25.0"
 
 
 def _init_home():
@@ -204,7 +204,9 @@ def load_pi_models():
     return d
 
 
-def parse_stations(path=STATIONS):
+def parse_stations(path=None):
+    if path is None:                 # 默认参数在 def 时就绑定, monkeypatch 不生效,
+        path = STATIONS              # 测试就会去读真实用户的 STATIONS.md
     """解析 STATIONS.md 里的站清单表格 -> [(name, base_url, key_spec, models, disabled)]。
     - key_spec 支持 `pi:provider名`(引用 pi 配置) 或直接写 sk-xxx
     - 模型列支持逗号/中文逗号/顿号分隔; 写 #off 则标记停用
@@ -244,7 +246,9 @@ def parse_stations(path=STATIONS):
     return rows
 
 
-def stations_to_config(path=STATIONS, say=None):
+def stations_to_config(path=None, say=None):
+    if path is None:
+        path = STATIONS
     """把 STATIONS.md 的表格转成 config.json 结构(不动 pi 的 models.json)。"""
     rows = parse_stations(path)
     if not rows:
@@ -2218,7 +2222,15 @@ def cmd_sync_stations(args, ctx):
     """从 STATIONS.md 读取站清单 → 同步到 config.json → 可选立刻体检。"""
     if not os.path.exists(STATIONS):
         ctx.die(f"[!] 缺少 {STATIONS}")
-    new = stations_to_config(say=ctx.say)
+    new = stations_to_config(path=STATIONS, say=ctx.say)
+    # 解析到 0 站时 stations_to_config 会 raise; 但"每一行都被跳过"(缺 base_url/key)
+    # 是另一条路 —— 那时表格还在, targets 却是空的。旧实现照样写盘, 把一份能用的
+    # 配置覆盖成空清单, 退出码 0。监控器最坏的失败不是报错, 是悄悄什么都不监控了。
+    if not new["targets"]:
+        ctx.die(f"[!] 解析出的目标数为 0: 上面被跳过的行缺 base_url 或 api_key "
+                f"(key 可写 pi:provider 复用 pi)。\n"
+                f"    拒绝用空清单覆盖 {CONFIG} —— 否则监控会静默停止。\n"
+                f"    修好 {STATIONS} 再同步; 确实要清空请手动编辑 {CONFIG}")
     old = load_json(CONFIG, {}) or {}
     oldt = old.get("targets", {})
 

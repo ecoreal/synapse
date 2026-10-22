@@ -1711,6 +1711,70 @@ class TestImportFromPiSafety(unittest.TestCase):
         cfg = json.load(open(synapse.CONFIG, encoding="utf-8"))
         self.assertNotIn("enable", cfg["targets"]["p1"], "写出了拼错的 enable 字段")
 
+class TestSyncNeverWritesEmptyConfig(unittest.TestCase):
+    """解析到 0 站会 raise; 但"每一行都被跳过"是另一条路 —— 那时 join 还在,
+    targets 却是空的。旧实现照样写盘: 站数 0 → 0, 退出码 0, 一份能用的配置
+    被覆盖成空清单。
+
+    监控器最坏的失败不是报错, 是悄悄什么都不监控了。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD", "STATIONS")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.STATIONS = os.path.join(self.tmp, "STATIONS.md")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+        synapse.save_json(synapse.CONFIG, {"targets": {
+            "good": {"base_url": "https://good.invalid", "api_key": "sk-xxxxxxxxxxxx0000",
+                     "models": ["m1"], "enabled": True, "default": True}}})
+        with open(synapse.STATIONS, "w", encoding="utf-8") as f:
+            f.write("| 名字 | Base URL | API Key | 模型 |\n|---|---|---|---|\n"
+                    "| bad1 |  |  | m1 |\n| bad2 | https://b2.invalid |  | m2 |\n")
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def test_refuses_to_overwrite_a_working_config_with_nothing(self):
+        self.out.seek(0); self.out.truncate(0)
+        rc = synapse.main(["sync-stations"], out=self.out, err=self.err)
+        self.assertEqual(rc, 1, "写出空清单居然不算失败")
+        cfg = json.load(open(synapse.CONFIG, encoding="utf-8"))
+        self.assertIn("good", cfg["targets"], "能用的配置被空清单覆盖了")
+        self.assertIn("bad1", self.out.getvalue() + self.err.getvalue(),
+                      "被跳过的站要逐个点名, 否则用户不知道为什么是空的")
+
+    def test_reads_the_configured_stations_file_not_the_default_one(self):
+        """默认参数在 def 时就绑定了 STATIONS —— monkeypatch 不生效。
+
+        这条一旦退回默认参数, 测试就会去读真实用户的 ~/.config/synapse/STATIONS.md,
+        既污染测试也掩盖 bug(上面那条拒绝写空清单的测试会因此看不见真正的空清单)。
+        """
+        with open(synapse.STATIONS, "w", encoding="utf-8") as f:
+            f.write("| 名字 | Base URL | API Key | 模型 |\n|---|---|---|---|\n"
+                    "| only | https://only.invalid | pi:only | m9 |\n")
+        self.out.seek(0); self.out.truncate(0)
+        rc = synapse.main(["sync-stations"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0)
+        cfg = json.load(open(synapse.CONFIG, encoding="utf-8"))
+        self.assertEqual(list(cfg["targets"]), ["only"],
+                         "读的不是当前配置的 STATIONS.md(默认参数绑定问题)")
+
+    def test_no_misleading_zero_to_zero_line(self):
+        self.out.seek(0); self.out.truncate(0)
+        synapse.main(["sync-stations"], out=self.out, err=self.err)
+        self.assertNotIn("站数: 0 → 0", self.out.getvalue())
+
 
 class TestDocsConsistency(unittest.TestCase):
     """文档里的版本号必须和代码一致。
