@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.25.0"
+__version__ = "1.26.0"
 
 
 def _init_home():
@@ -564,16 +564,29 @@ def _auto_recover_from_rows(rows, db=None, say=None):
             continue
         tgt, mdl = i.get("target"), i.get("model") or ""
         hit = ((tgt, mdl) in ok_pairs) if mdl else (tgt in ok_targets)
-        if not hit:
-            continue
         notes = i.setdefault("notes", [])
-        prev = [n for n in notes if str(n.get("text", "")).startswith("[恢复]")]
-        if len(prev) >= 1:                       # 连续第二轮恢复 → 结单
+        # "连续"必须真的连续: 用计数, 不用"历史上出现过一条 [恢复] 笔记"。
+        # 否则 ok → 失败 → ok 会被判成连续两轮, 给还在抖的站结单。
+        streak = i.get("recover_streak")
+        if streak is None:                       # 老台账: 用末尾连续的恢复笔记推
+            streak = len([n for n in notes
+                          if str(n.get("text", "")).startswith("[恢复]")])
+        if not hit:
+            if streak:                           # 恢复观察被打断 → 归零并留痕
+                i["recover_streak"] = 0
+                notes.append({"time": now(),
+                              "text": f"[恢复] 中断: 本轮又失败({i.get('kind')}), 恢复计数归零"})
+                say(f"  ↺ 问题 #{i['id']} {tgt}/{mdl or '(整站)'} 恢复观察中断, 重新计数")
+                changed += 1
+            continue
+        if streak >= 1:                          # 连续第二轮恢复 → 结单
             i["status"] = "fixed"
+            i["recover_streak"] = streak + 1
             notes.append({"time": now(),
                           "text": "[恢复] 连续两轮体检均正常, 自动结单(auto)"})
             say(f"  ✅ 问题 #{i['id']} {tgt}/{mdl or '(整站)'} 连续两轮恢复 → 自动结单")
         else:
+            i["recover_streak"] = streak + 1
             notes.append({"time": now(),
                           "text": f"[恢复] 本轮体检正常({i.get('kind')}), 再观察一轮"})
             say(f"  ↺ 问题 #{i['id']} {tgt}/{mdl or '(整站)'} 已恢复, 待下一轮确认结单")

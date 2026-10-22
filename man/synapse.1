@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.25.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.26.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -59,6 +59,16 @@ list 支持 \-\-json 输出 {total, open, filter, issues}。
 .ad l
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
 .TP
+.SH 自动结单必须是"连续"两轮
+\fB\-\-\-\fR 自动结单的文案是"连续两轮体检均正常", 但旧实现数的是"历史上
+出现过几条 \fB[恢复]\fR 笔记"。
+.PP
+于是 \fBok\fR → 失败 → \fBok\fR 会被判成连续两轮, 给一个还在抖的站结单。
+工具在一句自己都不成立的话上结单, 比不结单糟得多。
+.PP
+现在用 \fBrecover\_streak\fR 计数: 本轮失败则归零并在台账里留一条"恢复观察中断",
+既不偷偷保留旧计数, 也不悄悄清零。老台账第一次被处理时从末尾恢复笔记推算。
+.PP
 .SH 空清单不可写
 \fBsync\-stations\fR 有两条通向空配置的路:
 .IP \(bu 2

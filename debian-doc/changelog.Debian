@@ -1,3 +1,14 @@
+synapse (1.26.0) unstable; urgency=medium
+
+  * 自动结单必须是"连续"两轮: 用 recover_streak 计数, 不再数历史笔记
+    - 旧实现: ok → 失败 → ok 被判成"连续两轮体检均正常"并自动结单,
+      给一个还在抖的站结单
+    - 本轮失败 → 计数归零, 台账留痕"恢复观察中断", 不偷偷保留也不悄悄清零
+    - 老台账首次处理时从末尾恢复笔记推算, 平滑迁移
+  * 新测试 3 项; 测试 200 -> 203
+
+ -- ec <ec@localhost>  Thu, 22 Oct 2026 14:20:00 +0800
+
 synapse (1.25.0) unstable; urgency=medium
 
   * sync-stations: 拒绝用空清单覆盖 config.json

@@ -207,6 +207,50 @@ class TestAutoRecover(unittest.TestCase):
         synapse._auto_recover_from_rows(self.rows_ok, db, say=QUIET)
         self.assertEqual(len(db["issues"][0]["notes"]), 1)
 
+class TestRecoveryMustBeConsecutive(unittest.TestCase):
+    """"连续两轮体检均正常"是工具的承诺, 但它实现成"历史上出现过一条 [恢复] 笔记"。
+
+    于是 ok → 失败 → ok 会被判成"连续两轮", 并给一个还在抖的站自动结单。
+    工具在一句自己都不成立的话上结单, 比不结单糟得多。
+    """
+
+    def setUp(self):
+        self._orig = (synapse.load_issues, synapse.save_issues)
+        synapse.save_issues = lambda db: None
+        self.q = lambda *a, **k: None
+        self.ok = [{"target": "t", "model": "m", "test": "basic", "kind": "ok"}]
+        self.bad = [{"target": "t", "model": "m", "test": "basic", "kind": "timeout"}]
+
+    def tearDown(self):
+        synapse.load_issues, synapse.save_issues = self._orig
+
+    def _db(self):
+        return {"issues": [{"id": 1, "time": synapse.now(), "status": "open",
+                            "target": "t", "model": "m", "kind": "WAF/CDN拦截",
+                            "symptom": "x", "notes": [], "auto": True}]}
+
+    def test_failure_between_two_oks_does_not_close(self):
+        db = self._db()
+        synapse._auto_recover_from_rows(self.ok, db, say=self.q)
+        synapse._auto_recover_from_rows(self.bad, db, say=self.q)
+        synapse._auto_recover_from_rows(self.ok, db, say=self.q)
+        self.assertEqual(db["issues"][0]["status"], "open",
+                         "中间夹了一轮失败, 却被判成连续两轮正常并结单")
+
+    def test_interruption_is_announced(self):
+        db = self._db()
+        synapse._auto_recover_from_rows(self.ok, db, say=self.q)
+        out = []
+        synapse._auto_recover_from_rows(self.bad, db, say=out.append)
+        self.assertTrue(any("中断" in s or "重新" in s for s in out),
+                        "恢复观察被中断时什么都没说, 台账里也看不出")
+
+    def test_two_consecutive_oks_still_close(self):
+        db = self._db()
+        synapse._auto_recover_from_rows(self.ok, db, say=self.q)
+        synapse._auto_recover_from_rows(self.ok, db, say=self.q)
+        self.assertEqual(db["issues"][0]["status"], "fixed")
+
 
 class TestToolJudge(unittest.TestCase):
     """_judge_tool_resp: 判错方向很致命 —— 误报 tool_call_broken 会让用户
