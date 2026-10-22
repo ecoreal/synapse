@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -1824,6 +1825,69 @@ class TestSyncNeverWritesEmptyConfig(unittest.TestCase):
         self.out.seek(0); self.out.truncate(0)
         synapse.main(["sync-stations"], out=self.out, err=self.err)
         self.assertNotIn("站数: 0 → 0", self.out.getvalue())
+class TestDesktopEntry(unittest.TestCase):
+    """装了包却在桌面启动器里搜不到 —— KRunner(GNOME 也一样)只列 .desktop。
+
+    CLI 工具"找不到"不是用户的错: 装完东西去启动器里搜名字是很自然的动作。
+    这里钉死入口文件本身, 以及它必须真的能启动(Exec 指向 synapse status)。
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DESKTOP = os.path.join(ROOT, "packaging-src", "desktop", "synapse.desktop")
+    ICON = os.path.join(ROOT, "packaging-src", "desktop", "synapse.svg")
+    BUILD = os.path.join(ROOT, "build-deb.sh")
+
+    def _kv(self):
+        with open(self.DESKTOP, encoding="utf-8") as f:
+            txt = f.read()
+        out = {}
+        for line in txt.splitlines():
+            if "=" in line and not line.strip().startswith("#"):
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+        return out
+
+    def test_entry_exists_and_is_a_launchable_app(self):
+        self.assertTrue(os.path.exists(self.DESKTOP), "桌面入口文件不存在")
+        kv = self._kv()
+        self.assertEqual(kv.get("Type"), "Application")
+        self.assertTrue(kv.get("Name"))
+        # 没有 Terminal=true 时启动器拉起的进程没有窗口, 看上去就是"没反应"
+        self.assertEqual(kv.get("Terminal"), "true")
+        self.assertEqual(kv.get("Icon"), "synapse")
+
+    def test_exec_actually_runs_synapse_status(self):
+        kv = self._kv()
+        self.assertIn("synapse status", kv.get("Exec", ""),
+                      "Exec 必须真的调用 synapse status")
+
+    def test_searchable_in_chinese_and_english(self):
+        kw = self._kv().get("Keywords", "")
+        for w in ("synapse", "中转站", "体检"):
+            self.assertIn(w, kw, f"启动器里搜不到「{w}」")
+
+    def test_icon_and_build_wiring_exist(self):
+        self.assertTrue(os.path.exists(self.ICON), "图标文件不存在")
+        self.assertIn("<svg", open(self.ICON, encoding="utf-8").read())
+        build = open(self.BUILD, encoding="utf-8").read()
+        self.assertIn("synapse.desktop", build, "build-deb.sh 没把 .desktop 打进包")
+        self.assertIn("synapse.svg", build, "build-deb.sh 没把图标打进包")
+
+    def test_postinst_refreshes_launcher_cache(self):
+        """装完不刷新缓存, KRunner 可能要重启才看得到新入口。"""
+        post = open(os.path.join(self.ROOT, "packaging-src", "DEBIAN", "postinst"),
+                    encoding="utf-8").read()
+        self.assertIn("update-desktop-database", post)
+        self.assertIn("gtk-update-icon-cache", post)
+
+    def test_desktop_file_validation(self):
+        if not shutil.which("desktop-file-validate"):
+            self.skipTest("desktop-file-validate 未安装")
+        r = subprocess.run(["desktop-file-validate", self.DESKTOP],
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 class TestEnableDisable(unittest.TestCase):
     """工具一直在建议"在 config.json 把 X 的 enabled 改 false", 却没有这个命令。
 

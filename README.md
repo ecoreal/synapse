@@ -101,6 +101,12 @@ synapse doctor --fix --apply    # 真改，然后复查
 `sk-`/`Bearer`/`api_key` 字段一律遮蔽，但保留 `401 invalid api key` 这类足以定位问题的字眼。
 报告与仪表盘统一 0600；历史文件由 `doctor` 扫描（含疑似密钥或权限过宽都会警告）。
 
+## 桌面启动器入口
+
+包里有 `/usr/share/applications/synapse.desktop` 与 hicolor 图标。
+
+没有它的时候，装完在 KRunner（`Alt+空格`）或 GNOME 启动器里搜不到任何东西——用户会直接认为「没装上」。入口带 `Terminal=true` 并执行 `synapse status`，回车才关窗（否则窗口一闪就没，同样像「没反应」）；Keywords 同时包含中英文，搜 `synapse` / 中转站 / 体检 / 监控 都能命中。`postinst` 里刷新 `update-desktop-database` 与图标缓存。
+
 ## `disable` / `enable`：别让用户手改配置
 
 体检的提示曾经是「在 config.json 把 X 的 enabled 改 false」。那是一份 0600 的 1.6KB JSON、9 个站，逗号错一个整份配置就读不出来（`check` 直接 `rc=2`），而且手改不留备份——而我们自己在 `sync-stations` 里刚警告过「别手改 config」。
@@ -432,7 +438,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 217 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 223 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

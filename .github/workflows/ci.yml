@@ -60,11 +60,13 @@ jobs:
           if dpkg-deb -R "$deb" /tmp/x && grep -rIlE 'sk-[A-Za-z0-9]{16,}' /tmp/x; then
             echo "[!] 包里出现疑似 API key" >&2; exit 1
           fi
-      - name: 模块齐全(拆成三层后容易漏打)
+      - name: 包内文件齐全(模块三层 + 桌面入口 / 图标)
         run: |
           deb=$(ls dist/*.deb)
-          for m in synapse.py synapse_classify.py synapse_probe.py synapse_dashboard.py; do
-            dpkg-deb -c "$deb" | grep -q "usr/lib/synapse/$m" || {
+          for m in usr/share/applications/synapse.desktop usr/share/icons/hicolor/scalable/apps/synapse.svg \
+                   usr/lib/synapse/synapse.py usr/lib/synapse/synapse_classify.py \
+                   usr/lib/synapse/synapse_probe.py usr/lib/synapse/synapse_dashboard.py; do
+            dpkg-deb -c "$deb" | grep -q "$m" || {
               echo "[!] 包里少了 $m" >&2; exit 1; }
           done
       - name: lintian

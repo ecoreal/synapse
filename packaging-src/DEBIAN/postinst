@@ -15,3 +15,9 @@ cat <<'EOF'
 │                                              │
 ╰──────────────────────────────────────────────╯
 EOF
+
+# 装了桌面入口就得刷新缓存, 否则 KRunner / GNOME 启动器要重登录才搜得到
+# (用户刚装完就去启动器里搜名字, 搜不到就会认为"没装上")。
+update-desktop-database -q /usr/share/applications 2>/dev/null || true
+gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+exit 0

@@ -1,3 +1,14 @@
+synapse (1.29.0) unstable; urgency=medium
+
+  * 新增桌面启动器入口(KRunner / GNOME 启动器可搜索)
+    - 之前只装 CLI, 装完在 Alt+空格 里搜不到, 用户会认为"没装上"
+    - synapse.desktop: Terminal=true + Exec=synapse status, 回车才关窗
+    - Keywords 含中英文(synapse/中转站/体检/监控/诊断)
+    - hicolor 图标; postinst 刷新 update-desktop-database 与图标缓存
+  * 新测试 6 项(含 desktop-file-validate); 测试 217 -> 223
+
+ -- ec <ec@localhost>  Thu, 22 Oct 2026 18:10:00 +0800
+
 synapse (1.28.0) unstable; urgency=medium
 
   * 新增 disable/enable: 不再教用户手改 0600 的 config.json

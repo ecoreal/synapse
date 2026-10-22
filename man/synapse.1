@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.28.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.29.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -59,6 +59,15 @@ list 支持 \-\-json 输出 {total, open, filter, issues}。
 .ad l
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
 .TP
+.SH 桌面启动器入口
+包里有 \fB/usr/share/applications/synapse.desktop\fR 与 hicolor 图标。
+.PP
+没有它的时候, 装完在 KRunner(\fBAlt+空格\fR) 或 GNOME 启动器里搜不到任何东西 ——
+用户会直接认为"没装上"。入口带 \fBTerminal=true\fR 并执行
+\fBsynapse status\fR, 回车才关窗(否则窗口一闪就没, 同样像"没反应");
+Keywords 同时包含中英文, 搜 synapse/中转站/体检/监控 都能命中。
+\fBpostinst\fR 里刷新 \fBupdate\u\_desktop\u\_database\fR 与图标缓存。
+.PP
 .SH disable / enable: 别让用户手改配置
 体检的提示曾经是"在 config.json 把 X 的 enabled 改 false"。那是一份 \fB0600\fR 的
 1.6KB JSON、9 个站, 逗号错一个整份配置就读不出来(\fBcheck\fR 直接 \fBrc=2\fR),

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Synapse
+Name[zh_CN]=Synapse 中转站体检
+GenericName=Relay Connectivity Monitor
+GenericName[zh_CN]=模型中转站连通性监控
+Comment=Check pi relay stations and tell you what to do next
+Comment[zh_CN]=检查 pi 中转站连通性、长跑失败趋势, 并给出下一步该敲什么命令
+# Terminal=true: 不给终端就等于"点了没反应"
+Exec=sh -c "synapse status; echo; echo 按回车键关闭窗口; read -r _"
+Icon=synapse
+Terminal=true
+Categories=System;Monitor;
+Keywords=synapse;relay;pi;api;monitor;status;uptime;体检;中转站;监控;模型;诊断;
+StartupNotify=false

@@ -43,7 +43,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.28.0"
+__version__ = "1.29.0"
 
 
 def _init_home():

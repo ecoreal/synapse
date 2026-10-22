@@ -48,6 +48,13 @@ done
 install -Dm644 packaging-src/bash-completion/synapse \
     "$U/share/bash-completion/completions/synapse"
 
+# 7) 桌面入口 + 图标: 没有 .desktop 时, 装完在 KRunner/GNOME 启动器里
+#    搜不到任何东西, 用户会以为"没装上"。
+install -Dm644 packaging-src/desktop/synapse.desktop \
+    "$U/share/applications/synapse.desktop"
+install -Dm644 packaging-src/desktop/synapse.svg \
+    "$U/share/icons/hicolor/scalable/apps/synapse.svg"
+
 # 8) 构建前清点: 包里绝不能有数据/密钥文件
 for f in config.json STATIONS.md issues.json .outage.json \
          .targets_snapshot.json .dirty reports; do
