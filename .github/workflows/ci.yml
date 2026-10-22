@@ -21,7 +21,7 @@ jobs:
           python-version: ${{ matrix.python }}
       # 项目承诺零第三方依赖 —— 这里刻意不装任何东西, 装了就说明承诺破了
       - name: 语法编译
-        run: python -m compileall -q synapse.py synapse_classify.py synapse_probe.py synapse_dashboard.py tests
+        run: python -m compileall -q synapse.py synapse_classify.py synapse_probe.py synapse_dashboard.py synapse_ui.py tests
       - name: 回归测试
         run: python -W error::ResourceWarning -m unittest discover -s tests -v
       - name: CLI 冒烟(临时数据目录, 不碰真实配置)
@@ -40,13 +40,19 @@ jobs:
     name: 打 deb 并检查内容
     runs-on: ubuntu-latest
     needs: test
+    # 外部源(apt)有时会挂住十几分钟, 与其无限等, 不如快速失败重跑
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - name: 安装 lintian
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq lintian
+        timeout-minutes: 8
+        run: |
+          sudo apt-get update -qq -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+          sudo apt-get install -y -qq lintian
       - name: 构建
         run: bash build-deb.sh
       - name: 校验包内容干净(不含任何数据/密钥)
