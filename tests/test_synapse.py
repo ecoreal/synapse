@@ -1643,6 +1643,74 @@ class TestSyncStationsSafety(unittest.TestCase):
                          "--dry-run 居然写了配置")
         self.assertIn("from_pi", self.out.getvalue())
 
+class TestImportFromPiSafety(unittest.TestCase):
+    """import-from-pi 也整体重写 config.json, 而且只写 key_from_pi/enabled/models。
+
+    手改过的 base_url、内联 api_key、enabled=false 全被抹掉, 没有备份。
+    和 sync-stations 是同一类写盘路径 —— 修一个就该顺手看眼兄弟。
+    它还曾写一个拼错的 "enable": None(应为 enabled), 把垃圾字段留在用户配置里。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD", "PI_MODELS")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        synapse.PI_MODELS = os.path.join(self.tmp, "models.json")
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+        synapse.save_json(synapse.PI_MODELS, {"providers": {"p1": {
+            "models": [{"id": "m1"}, {"id": "m2"}]}}})
+        synapse.save_json(synapse.CONFIG, {"targets": {
+            "p1": {"base_url": "https://my.proxy", "api_key": "sk-keepme0000000000",
+                   "enabled": False, "models": ["m1"], "default": True}}})
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def test_backs_up_config_first(self):
+        self._run("import-from-pi", "--default", "p1")
+        baks = [n for n in os.listdir(synapse.HOME) if "config.json.bak." in n]
+        self.assertEqual(len(baks), 1, "重写 config 前没有留备份")
+        self.assertEqual(os.stat(os.path.join(synapse.HOME, baks[0])).st_mode & 0o777,
+                         0o600)
+
+    def test_keeps_hand_written_base_url_and_key(self):
+        self._run("import-from-pi", "--default", "p1")
+        cfg = json.load(open(synapse.CONFIG, encoding="utf-8"))
+        t = cfg["targets"]["p1"]
+        self.assertEqual(t.get("base_url"), "https://my.proxy", "手写的 base_url 被抹掉了")
+        self.assertEqual(t.get("api_key"), "sk-keepme0000000000", "内联 key 被抹掉了")
+        self.assertIs(t.get("enabled"), False, "enabled=false 被改回了 true")
+
+    def test_only_one_default_station(self):
+        """重建后不能出现两个 default: 旧的 default 标记不该被继承。"""
+        synapse.save_json(synapse.PI_MODELS, {"providers": {
+            "p1": {"models": [{"id": "m1"}]}, "p2": {"models": [{"id": "m2"}]}}})
+        cfg = json.load(open(synapse.CONFIG, encoding="utf-8"))
+        cfg["targets"]["p2"] = {"key_from_pi": "p2", "enabled": True, "default": True}
+        synapse.save_json(synapse.CONFIG, cfg)
+        self._run("import-from-pi", "--default", "p1")
+        after = json.load(open(synapse.CONFIG, encoding="utf-8"))["targets"]
+        self.assertEqual([k for k, v in after.items() if v.get("default")], ["p1"])
+
+    def test_no_typo_enable_field(self):
+        self._run("import-from-pi", "--default", "p1")
+        cfg = json.load(open(synapse.CONFIG, encoding="utf-8"))
+        self.assertNotIn("enable", cfg["targets"]["p1"], "写出了拼错的 enable 字段")
+
 
 class TestDocsConsistency(unittest.TestCase):
     """文档里的版本号必须和代码一致。

@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.23.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.24.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -59,6 +59,21 @@ list 支持 \-\-json 输出 {total, open, filter, issues}。
 .ad l
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
 .TP
+.SH import\-from\-pi 只重建"目标清单"
+\fBimport\-from\-pi\fR 也整体重写 \fBconfig.json\fR。它的重建范围是"从 pi 来的
+目标清单", 不是"整份配置":
+.IP \(bu 2
+已有目标手写的 \fBbase_url\fR / 内联 \fBapi\fR\fB_key\fR / \fBenabled\fR
+    = false 全部保留(旧实现只写 key\_from\_pi/enabled/models, 手写的 key 被抹掉,
+    而且没有备份)
+.IP \(bu 2
+写盘前同样自动备份 \fBconfig.json.bak.<时间戳>\fR (0600); 备份失败则拒绝重写
+.IP \(bu 2
+\fBdefault\fR 不继承 —— 默认站只由 \fB\-\-default\fR 决定, 否则重建后可能
+    出现两个默认站
+.IP \(bu 2
+不再写出拼错的 \fBenable\fR 字段(应为 \fBenabled\fR)
+.PP
 .SH sync\-stations 会重写 config.json
 \fBsync\-stations\fR 用 \fBSTATIONS.md\fR 整体重写 \fBconfig.json\fR —— 连
 \fB\-\-default\fR 改一个标志位也是重写整份。而 \fBbest\fR / \fBstatus\fR

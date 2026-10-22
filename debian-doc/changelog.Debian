@@ -1,3 +1,15 @@
+synapse (1.24.0) unstable; urgency=medium
+
+  * import-from-pi: 保留手写的 base_url / 内联 api_key / enabled=false
+    - 旧实现只写 key_from_pi/enabled/models, 用户手写字段被静默抹掉
+    - 该子命令同样整体重写 config.json, 却没有备份
+  * import-from-pi: 写盘前自动备份 config.json(0600), 失败则拒绝重写
+  * 不再写出拼错的 "enable": None 字段(应为 enabled)
+  * default 不继承: 默认站只由 --default 决定, 避免出现两个默认站
+  * 新测试 4 项; 测试 193 -> 197
+
+ -- ec <ec@localhost>  Thu, 22 Oct 2026 13:05:00 +0800
+
 synapse (1.23.0) unstable; urgency=medium
 
   * sync-stations: 写盘前自动备份 config.json, 移除目标时大声说明并可退回

@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.23.0"
+__version__ = "1.24.0"
 
 
 def _init_home():
@@ -2376,17 +2376,31 @@ def cmd_fix(args, ctx):
 
 def cmd_import(args, ctx):
     pi = load_pi_models()
+    # 已有配置里的手工字段(独立 base_url / 内联 api_key / enabled=false)必须留着:
+    # 这个子命令的重建范围是"从 pi 来的目标清单", 不是"整份配置"。抹掉用户手写
+    # 的 key 之后还得让他重填, 而他没有任何备份。
+    old = _read_user_json(CONFIG, {"targets": {}}).get("targets", {})
     cfg = {"$comment": "Synapse 目标配置。key_from_pi=引用pi里的provider(不重复存key); 也可直接填 base_url/api_key。",
            "targets": {}}
     for name, prov in pi.get("providers", {}).items():
-        cfg["targets"][name] = {
-            "key_from_pi": name,
-            "enable": None,
-            "enabled": True,
-            "models": [m["id"] for m in prov.get("models", [])],
-        }
+        prev = old.get(name) or {}
+        # 不继承 default: 默认站只由 --default 决定, 否则重建后可能有两个默认站
+        entry = {k: v for k, v in prev.items()
+                 if k in ("base_url", "api_key", "key_from_pi", "enabled")}
+        entry.setdefault("key_from_pi", name)     # 没写过就引用 pi, 写过就用他写的
+        entry.setdefault("enabled", True)
+        entry["models"] = [m["id"] for m in prov.get("models", [])]
+        cfg["targets"][name] = entry
     cfg["targets"][args.default] = cfg["targets"].get(args.default, {"enabled": True})
     cfg["targets"][args.default]["default"] = True
+    if os.path.exists(CONFIG):
+        backup = CONFIG + f".bak.{datetime.datetime.now():%Y%m%d-%H%M%S}"
+        try:
+            import shutil
+            shutil.copy2(CONFIG, backup)
+            chmod_private(backup)
+        except OSError as e:
+            ctx.die(f"[!] 无法备份 {CONFIG}({e}) —— 拒绝在无备份的情况下重写")
     save_json(CONFIG, cfg)
     mark_dirty("import-from-pi 重建目标清单")
     ctx.say(f"[完成] 已从 pi 导入 {len(pi.get('providers', {}))} 个目标 -> {CONFIG}")

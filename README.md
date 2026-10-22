@@ -101,6 +101,15 @@ synapse doctor --fix --apply    # 真改，然后复查
 `sk-`/`Bearer`/`api_key` 字段一律遮蔽，但保留 `401 invalid api key` 这类足以定位问题的字眼。
 报告与仪表盘统一 0600；历史文件由 `doctor` 扫描（含疑似密钥或权限过宽都会警告）。
 
+## `import-from-pi` 只重建「目标清单」
+
+`import-from-pi` 也整体重写 `config.json`，但它的重建范围是**从 pi 来的目标清单**，不是整份配置：
+
+- 已有目标里手写的 `base_url`、内联 `api_key`、`enabled: false` **全部保留**（旧实现只写 `key_from_pi`/`enabled`/`models`，手写的 key 直接被抹掉，而且没有备份）
+- 写盘前同样自动备份 `config.json.bak.<时间戳>`（0600），备份失败就拒绝重写
+- `default` **不继承**——默认站只由 `--default` 决定，否则重建后可能出现两个默认站
+- 不再写出拼错的 `enable` 字段（应为 `enabled`）
+
 ## `sync-stations` 会重写整份 config.json
 
 `sync-stations` 用 `STATIONS.md` 整体重写 `config.json`——连 `--default` 改一个标志位也是重写整份。而从 1.17.0 起 `best`/`status` 会劝你敲这条命令（默认站和推荐站不一致时），所以它必须安全：
@@ -395,7 +404,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 193 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 197 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb
