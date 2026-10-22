@@ -101,6 +101,14 @@ synapse doctor --fix --apply    # 真改，然后复查
 `sk-`/`Bearer`/`api_key` 字段一律遮蔽，但保留 `401 invalid api key` 这类足以定位问题的字眼。
 报告与仪表盘统一 0600；历史文件由 `doctor` 扫描（含疑似密钥或权限过宽都会警告）。
 
+## 文件权限：每个文件，不只 config.json
+
+我们写的每个文件都只有本人可读（0600）：`config.json`、`issues.json`、`.outage.json`、`.targets_snapshot.json`、`STATIONS.md`、`reports/*.json`，以及 `fix --apply` 写出的 `models.json.bak.*`。
+
+最后一项尤其要紧：备份里是**明文 key**，旧实现用 `copy2` 继承源权限（源文件松它就松），而且备份从不清理、`doctor` 也从不看它。
+
+这条规则以前只覆盖 `config.json` 和 `reports/`，于是真实数据上 `issues.json` 和 `.targets_snapshot.json` 一直是 0664，而 `doctor` 报「全部正常」。现在两项检查（`数据文件权限` / `pi 备份权限`）盯着它，`doctor --fix --apply` 一次改齐。
+
 ## 数据文件坏了会怎样
 
 监控工具不能因为数据坏就瘫掉，也不能装作没发生。三类文件区别对待：
@@ -372,7 +380,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 186 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 190 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

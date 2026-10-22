@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.21.0"
+__version__ = "1.22.0"
 
 
 def _init_home():
@@ -980,6 +980,57 @@ _RE_LEAK_SK = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 _RE_LEAK_BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}")
 
 
+def _loose_data_files(limit=600):
+    """我们自己的数据文件里, 哪些对同组/其他用户可读。返回 [(path, mode)]。
+
+    之前只查 config.json 和 reports/ —— 而 issues.json 曾是 0664、.outage.json
+    也可能松。同一目录下"哪个文件松"取决于它是哪个版本写的, 这不可接受。
+    """
+    loose = []
+    candidates = []
+    for d, names in ((HOME, None), (REPORTS, ".json")):
+        try:
+            entries = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for n in entries:
+            if names and not n.endswith(names):
+                continue
+            if names is None and not (n.endswith(".json") or n.endswith(".md")):
+                continue
+            candidates.append(os.path.join(d, n))
+    for path in candidates[:limit]:
+        if not os.path.isfile(path):
+            continue
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            continue
+        if mode & 0o077:
+            loose.append((path, mode))
+    return loose
+
+
+def _pi_backups(limit=50):
+    """pi models.json 的备份。里面是**明文 key**, 松权限的必须点名。"""
+    d = os.path.dirname(PI_MODELS) or "."
+    base = os.path.basename(PI_MODELS) + ".bak."
+    out = []
+    try:
+        names = sorted(n for n in os.listdir(d) if n.startswith(base))
+    except OSError:
+        return out
+    for n in names[-limit:]:
+        path = os.path.join(d, n)
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            continue
+        if mode & 0o077:
+            out.append((path, mode))
+    return out
+
+
 def _report_leaks(limit=400):
     """最近一批报告里, 哪些把疑似密钥写进了文件。doctor 与 doctor --fix 共用。"""
     try:
@@ -1113,6 +1164,28 @@ def _doctor_checks(stale_hours=3.0):
             else:
                 add("ok", "问题台账", f"未解决 {len(open_is)} 条, 都在 14 天内")
 
+    # 6.5 数据文件权限: 我们写的每个文件都要 0600, 不只 config.json
+    loose_mine = _loose_data_files()
+    if loose_mine:
+        p0, m0 = loose_mine[0]
+        add("warn", "数据文件权限",
+            f"{len(loose_mine)} 个数据文件对同组/其他用户可读"
+            f"(如 {os.path.basename(p0)} 是 {m0:04o})",
+            f"{CMD} doctor --fix --apply   (统一改成 0600)")
+    else:
+        add("ok", "数据文件权限", "都只有本人可读")
+
+    # 6.6 pi 备份: fix --apply 写出的 models.json.bak.*, 里面是明文 key
+    loose_bak = _pi_backups()
+    if loose_bak:
+        p0, m0 = loose_bak[0]
+        add("warn", "pi 备份权限",
+            f"{len(loose_bak)} 个 models.json 备份对别人可读"
+            f"(如 {os.path.basename(p0)} 是 {m0:04o}), 里面是明文 key",
+            f"{CMD} doctor --fix --apply   或 chmod 600 {os.path.dirname(p0)}/*.bak.*")
+    else:
+        add("ok", "pi 备份权限", "没有失控的 models.json 备份")
+
     # 7. 报告目录: 只报事实, 超过阈值才提醒(磁盘是会被撑满的)
     try:
         names = [n for n in os.listdir(REPORTS) if n.endswith(".json")]
@@ -1192,23 +1265,10 @@ def _doctor_actions(limit=600):
     悄悄改掉证据比留着更糟, 人得自己看一眼。
     """
     actions = []
-    try:
-        names = sorted(os.listdir(REPORTS))
-    except OSError:
-        return actions
-    for n in names:
-        if not n.endswith(".json"):
-            continue
-        path = os.path.join(REPORTS, n)
-        try:
-            st = os.stat(path)
-        except OSError:
-            continue
-        mode = st.st_mode & 0o777
-        if mode & 0o077:
-            actions.append({"what": "chmod", "path": path,
-                            "from": format(mode, "o"), "to": "600",
-                            "why": "同目录下的 config.json 是 0600, 报告里可能含响应片段"})
+    for path, mode in (_loose_data_files(limit) + _pi_backups(limit)):
+        actions.append({"what": "chmod", "path": path,
+                        "from": format(mode, "o"), "to": "600",
+                        "why": "里面可能有密钥或响应片段, 与 config.json 同等对待"})
         if len(actions) >= limit:
             break
     return actions
@@ -1247,7 +1307,8 @@ def cmd_doctor_fix(args, ctx):
             fixed += 1
         except OSError as e:
             ctx.say(f"[!] 无法修改 {a['path']}: {e}")
-    ctx.say(f"[OK] 已修 {fixed} 项(报告权限 → 0600)")
+    ctx.say(f"[OK] 已修 {fixed} 项权限 → 0600"
+            f"(数据文件与报告; 与 config.json 同等对待)")
 
     # 含密钥的报告: 只报不算, 悄悄改掉证据比留着更糟
     leaks = [n for n in _report_leaks()]
@@ -2256,6 +2317,7 @@ def cmd_fix(args, ctx):
         target.pop("thinkingLevelMap", None)
         import shutil
         shutil.copy2(PI_MODELS, backup)
+        chmod_private(backup)      # 备份里是明文 key, 不能继承源权限
         save_json(PI_MODELS, pi)
         ctx.say(f"[完成] 已写入 {PI_MODELS} (备份: {backup})。重启 pi 生效。")
     elif args.fix == "disable-image":
@@ -2272,6 +2334,7 @@ def cmd_fix(args, ctx):
             return
         import shutil
         shutil.copy2(PI_MODELS, backup)
+        chmod_private(backup)      # 备份里是明文 key, 不能继承源权限
         target["input"] = ["text"]
         save_json(PI_MODELS, pi)
         ctx.say(f"[完成] 已写入 {PI_MODELS} (备份: {backup})。重启 pi 生效。")

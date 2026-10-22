@@ -1,3 +1,18 @@
+synapse (1.22.0) unstable; urgency=medium
+
+  * 文件权限统一到 0600, 覆盖我们自己写的每一个文件
+    - 旧版只查 config.json 与 reports/; 真实数据上 issues.json 与
+      .targets_snapshot.json 一直是 0664, 而 doctor 报"全部正常"
+    - 新增检查: 数据文件权限 / pi 备份权限
+  * fix --apply 的 models.json.bak.* 强制 0600
+    - 备份里是明文 key, 旧实现用 copy2 继承源权限(源文件松它就松)
+    - 该备份从不清理, doctor 原先也从不看它
+  * _loose_data_files() / _pi_backups(): 检查与 --fix 共用同一份枚举
+  * 真实数据上修复 2 项, doctor 警告 3 -> 2
+  * 测试 186 -> 190 项
+
+ -- ec <ec@localhost>  Thu, 22 Oct 2026 00:05:00 +0800
+
 synapse (1.21.0) unstable; urgency=medium
 
   * status: 两块"连败"统计各自声明口径, 差额存在时当面解释

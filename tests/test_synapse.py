@@ -1502,6 +1502,83 @@ class TestDoctorFix(unittest.TestCase):
         self.assertEqual(open(path, encoding="utf-8").read(), before)
         self.assertIn("含密钥", self.out.getvalue())
 
+class TestDataFilePermissions(unittest.TestCase):
+    """同目录下我们自己写的文件, 权限必须一致 —— 否则"最敏感的那个"取决于
+    哪个文件恰好是旧版本写的。
+
+    真实数据: config.json 0600, reports 已修成 0600, 而 issues.json 是 0664
+    (旧版本 save_json 没 chmod)。doctor 只看 config 和 reports, 于是它
+    一直"全部正常"。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD", "PI_MODELS")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        synapse.PI_MODELS = os.path.join(self.tmp, "pi", "models.json")
+        os.makedirs(synapse.REPORTS)
+        os.makedirs(os.path.dirname(synapse.PI_MODELS))
+        self.out, self.err = io.StringIO(), io.StringIO()
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {
+            "enabled": True, "models": ["m1"], "default": True}}})
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _mode(self, p):
+        return os.stat(p).st_mode & 0o777
+
+    def _write(self, path, obj, mode):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f)
+        os.chmod(path, mode)
+
+    def test_doctor_notices_a_loose_issues_file(self):
+        self._write(synapse.ISSUES, {"issues": []}, 0o664)
+        rc = synapse.main(["doctor"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0)                      # 警告不该让进程失败
+        self.assertIn("issues.json", self.out.getvalue())
+
+    def test_fix_makes_every_data_file_private(self):
+        self._write(synapse.ISSUES, {"issues": []}, 0o664)
+        self._write(os.path.join(synapse.HOME, ".outage.json"), {}, 0o666)
+        rc = synapse.main(["doctor", "--fix", "--apply"], out=self.out, err=self.err)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self._mode(synapse.ISSUES), 0o600)
+        self.assertEqual(self._mode(os.path.join(synapse.HOME, ".outage.json")), 0o600)
+
+    def test_backup_of_pi_models_is_not_world_readable(self):
+        """fix --apply 会备份 models.json —— 那是明文 key, 备份也必须 0600。"""
+        self._write(synapse.PI_MODELS,
+                    {"providers": {"t": {"models": [{"id": "m1", "reasoning": True}]}}},
+                    0o644)
+        rc = synapse.main(["fix", "--target", "t", "--model", "m1",
+                           "--fix", "disable-reasoning", "--apply"],
+                          out=self.out, err=self.err)
+        self.assertEqual(rc, 0)
+        d = os.path.dirname(synapse.PI_MODELS)
+        baks = [n for n in os.listdir(d) if ".bak." in n]
+        self.assertEqual(len(baks), 1)
+        self.assertEqual(self._mode(os.path.join(d, baks[0])), 0o600)
+
+    def test_doctor_flags_a_world_readable_pi_backup(self):
+        self._write(synapse.PI_MODELS, {"providers": {}}, 0o600)
+        self._write(synapse.PI_MODELS + ".bak.20260101-000000",
+                    {"providers": {"t": {"apiKey": "sk-abcdefghijklmnop1234"}}}, 0o644)
+        synapse.main(["doctor"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("models.json.bak", text)
+        self.assertIn("0644", text)
+
 
 class TestDocsConsistency(unittest.TestCase):
     """文档里的版本号必须和代码一致。

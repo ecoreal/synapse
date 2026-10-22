@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.21.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.22.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -59,6 +59,18 @@ list 支持 \-\-json 输出 {total, open, filter, issues}。
 .ad l
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
 .TP
+.SH 文件权限
+我们写的每个文件都只有本人可读(\fB0600\fR), 不只 config.json:
+数据文件(\fBconfig.json\fR / \fBissues.json\fR / \fB.outage.json\fR /
+\fB.targets\_snapshot.json\fR / \fBSTATIONS.md\fR)、\fBreports/*.json\fR,
+以及 \fBfix \-\-apply\fR 写出的 \fBmodels.json.bak.*\fR。
+.PP
+最后一项尤其要紧: 备份里是\fB明文 key\fR, 旧实现用 \fBcopy2\fR 继承源权限,
+源文件松它就松; 而且备份从不清理、doctor 也从不看它。
+.PP
+\fBdoctor\fR 的两项检查(\fI数据文件权限\fR / \fIpi 备份权限\fR)盯着这条,
+\fBdoctor \-\-fix \-\-apply\fR 一次改齐。
+
 .SH 两个"连败"
 \fBstatus\fR 里有两块统计都报连败, 口径不同, 都"对":
 .IP \(bu 2
