@@ -101,11 +101,35 @@ synapse doctor --fix --apply    # 真改，然后复查
 `sk-`/`Bearer`/`api_key` 字段一律遮蔽，但保留 `401 invalid api key` 这类足以定位问题的字眼。
 报告与仪表盘统一 0600；历史文件由 `doctor` 扫描（含疑似密钥或权限过宽都会警告）。
 
+## 图形界面（本地网页控制台）
+
+```bash
+synapse ui                # 起控制台并自动打开浏览器
+synapse ui --port 8800    # 固定端口
+synapse ui --no-browser   # 只给地址, 自己粘
+```
+
+为什么是「本地网页」而不是 Electron/Qt：Synapse 的硬约束是**零第三方依赖**。`synapse ui` 只用标准库（`http.server`）起一个进程内服务，页面是自包含的单文件 HTML/CSS/JS（无 CDN、无外部字体、断网可用），数据来自 `synapse status --json` 的同一份计算。
+
+界面里能做的事：
+
+| 区域 | 内容 |
+|---|---|
+| 顶部横幅 | **结论先行**：谁正在失败、最久坏了多久 |
+| 卡片 | 推荐站 / 默认站是否与推荐不一致 / 最近一次全量体检 / 未解决台账条数 |
+| 目标清单 | 每个站的状态、最近一轮、连败、通过率、p50；按钮：**停用/启用**、**单站体检** |
+| 长期稳定性 | 窗口内每个模型的通过率、当前连败、最长连败、首次异常、最近一次通过 |
+| 台账 | 未解决问题（kind / 目标 / 次数 / 最近时间） |
+
+右上「立即全量体检」跑的就是 `synapse check`（同一份实现）。「停用」走 `_set_target_enabled()`——**先备份、只翻 `enabled`**，和 `synapse disable` 完全等价，不会出现网页和命令行各写一套的情况。
+
+安全：只绑 `127.0.0.1`；**所有请求（含首页）都要 token**（启动时打印在 URL 里），防止本机其它网页用 `<img src="http://127.0.0.1:PORT/api/target?...">` 偷偷替你改配置。
+
 ## 桌面启动器入口
 
-包里有 `/usr/share/applications/synapse.desktop` 与 hicolor 图标。
+包里有 `synapse.desktop`（主入口，打开上面的控制台）和 `synapse-status.desktop`（纯终端一屏文字）。没有它们的时候，装完在 KRunner（`Alt+空格`）或 GNOME 启动器里搜不到任何东西——用户会直接认为「没装上」。
 
-没有它的时候，装完在 KRunner（`Alt+空格`）或 GNOME 启动器里搜不到任何东西——用户会直接认为「没装上」。入口带 `Terminal=true` 并执行 `synapse status`，回车才关窗（否则窗口一闪就没，同样像「没反应」）；Keywords 同时包含中英文，搜 `synapse` / 中转站 / 体检 / 监控 都能命中。`postinst` 里刷新 `update-desktop-database` 与图标缓存。
+两个入口都带 `Terminal=true` 并在退出后等回车（否则窗口一闪就没，同样像「没反应」）；Keywords 中英双语，搜 `synapse` / 中转站 / 体检 / 控制台 都能命中。`postinst` 会刷新 `update-desktop-database` 与图标缓存。
 
 ## `disable` / `enable`：别让用户手改配置
 
@@ -264,6 +288,9 @@ python3 synapse.py uptime --days 7
 ## 常用命令
 
 ```bash
+# 图形界面：本地网页控制台（零依赖，自动开浏览器）
+python3 synapse.py ui
+
 # 一次性全量连通性检查（并发，结果打印 + 存 reports/）
 python3 synapse.py check -v
 
@@ -438,7 +465,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 223 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 243 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

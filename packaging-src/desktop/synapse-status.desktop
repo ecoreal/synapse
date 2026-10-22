@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Synapse Status (Terminal)
+Name[zh_CN]=Synapse 状态(终端)
+GenericName=Relay Status Text View
+GenericName[zh_CN]=中转站状态文本速览
+Comment=One-screen text status: what is failing right now
+Comment[zh_CN]=一屏文字结论: 现在谁在失败、最久多久
+Exec=sh -c "synapse status; echo; echo 按回车键关闭窗口; read -r _"
+Icon=synapse
+Terminal=true
+Categories=System;Monitor;
+Keywords=synapse;status;terminal;体检;状态;终端;中转站;
+StartupNotify=false

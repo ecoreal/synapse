@@ -12,11 +12,13 @@ import os
 import shutil
 import stat
 import subprocess
+import threading
 import sys
 import tempfile
 import time
 import unittest
 import urllib.error
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import synapse  # noqa: E402
@@ -1825,6 +1827,263 @@ class TestSyncNeverWritesEmptyConfig(unittest.TestCase):
         self.out.seek(0); self.out.truncate(0)
         synapse.main(["sync-stations"], out=self.out, err=self.err)
         self.assertNotIn("站数: 0 → 0", self.out.getvalue())
+class TestUiRendering(unittest.TestCase):
+    """UI 必须离线可看、必须带 token、不能有外部资源。"""
+
+    def test_page_is_self_contained(self):
+        import synapse_ui as ui
+        h = ui.render_app("TOKEN-XYZ")
+        for bad in ("http://", "https://", "<script src", "@import", "url(http", "//cdn"):
+            self.assertNotIn(bad, h, f"页面引用了外部资源 {bad}")
+        self.assertIn("Synapse", h)
+        self.assertIn("TOKEN-XYZ", h)
+
+    def test_page_title_is_escaped(self):
+        import synapse_ui as ui
+        h = ui.render_app("t", title="<b>x</b>")
+        self.assertIn("&lt;b&gt;x&lt;/b&gt;", h)
+        self.assertNotIn("<b>x</b>", h)
+
+    def test_token_with_quote_cannot_break_out_of_js(self):
+        import synapse_ui as ui
+        h = ui.render_app('a"b</script>')
+        self.assertNotIn('</script>"', h)
+        self.assertIn("a&quot;b", h)
+
+
+class TestUiServer(unittest.TestCase):
+    """UI 的传输层: token 守门、路由、参数校验。
+
+    重点是 CSRF: 本机其它网页可以用 <img src="http://127.0.0.1:PORT/api/target?...">
+    打我们的接口, 所以只绑回环是不够的, 每个请求都必须带 token。
+    """
+
+    def setUp(self):
+        import synapse_ui as ui
+        self.ui = ui
+        self.calls = []
+        api = {
+            "snapshot": lambda: {"hello": "world", "verdict": {"failing": 2}},
+            "check": lambda t, m: self.calls.append(("check", t, m)) or {"summary": {"total": 3}},
+            "toggle": lambda n, e: self.calls.append(("toggle", n, e)) or {"changed": True},
+        }
+        self.srv, self.url = ui.make_server(api, "T0K", port=0)
+        self.port = self.srv.server_address[1]
+        self.th = threading.Thread(target=self.srv.serve_forever, daemon=True)
+        self.th.start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.th.join(timeout=5)
+
+    def _get(self, path, tok="T0K", headers=None):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        if tok is not None:
+            url += ("&" if "?" in path else "?") + "t=" + tok
+        req = urllib.request.Request(url, headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8")
+
+    def _post(self, path, body, tok="T0K", headers=None):
+        url = f"http://127.0.0.1:{self.port}{path}"
+        if tok is not None:
+            url += "?t=" + tok
+        data = json.dumps(body).encode()
+        h = {"Content-Type": "application/json"}
+        h.update(headers or {})
+        req = urllib.request.Request(url, data=data, headers=h, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8")
+
+    def test_missing_token_is_rejected_everywhere(self):
+        for path in ("/", "/api/snapshot"):
+            code, _ = self._get(path, tok=None)
+            self.assertEqual(code, 403, path)
+        code, _ = self._post("/api/target", {"name": "a", "enabled": False}, tok=None)
+        self.assertEqual(code, 403)
+        self.assertEqual(self.calls, [], "没有 token 的请求绝不能触发动作")
+
+    def test_wrong_token_is_rejected(self):
+        code, _ = self._get("/", tok="nope")
+        self.assertEqual(code, 403)
+
+    def test_header_token_also_works(self):
+        code, body = self._get("/api/snapshot", tok=None,
+                              headers={"X-Synapse-Token": "T0K"})
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["hello"], "world")
+
+    def test_page_and_snapshot_served(self):
+        code, body = self._get("/")
+        self.assertEqual(code, 200)
+        self.assertIn("Synapse", body)
+        code, body = self._get("/api/snapshot")
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(body)["verdict"]["failing"], 2)
+
+    def test_toggle_parses_and_validates(self):
+        code, body = self._post("/api/target", {"name": " kool ", "enabled": False})
+        self.assertEqual(code, 200)
+        self.assertEqual(self.calls, [("toggle", "kool", False)])
+        # 参数不合法时不能猜, 也不能默默当成 false
+        for bad in ({"name": "x"}, {"name": "x", "enabled": "yes"}, {"enabled": True}):
+            code, _ = self._post("/api/target", bad)
+            self.assertEqual(code, 400, bad)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_check_parses_target_and_model(self):
+        self.assertEqual(self._post("/api/check", {"target": "kool"})[0], 200)
+        self.assertEqual(self._post("/api/check", {})[0], 200)
+        self.assertEqual(self.calls, [("check", "kool", None), ("check", None, None)])
+
+    def test_unknown_paths_and_methods(self):
+        self.assertEqual(self._get("/api/nope")[0], 404)
+        url = f"http://127.0.0.1:{self.port}/api/snapshot?t=T0K"
+        req = urllib.request.Request(url, method="PUT", data=b"{}")
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            self.fail("PUT 不该被接受")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 405)
+
+    def test_error_in_action_is_reported_not_crashing(self):
+        def boom(n, e):
+            raise ValueError("配置里没有目标 " + n)
+        srv, url = self.ui.make_server({"snapshot": lambda: {}, "check": lambda t, m: {},
+                                        "toggle": boom}, "T1", port=0)
+        th = threading.Thread(target=srv.serve_forever, daemon=True); th.start()
+        try:
+            port = srv.server_address[1]
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/target?t=T1",
+                data=json.dumps({"name": "nope", "enabled": False}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                urllib.request.urlopen(req, timeout=10)
+                self.fail("应该返回 400")
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 400)
+                self.assertIn("没有目标", e.read().decode("utf-8"))
+        finally:
+            srv.shutdown(); srv.server_close(); th.join(timeout=5)
+
+
+class TestUiSharesOneImplementation(unittest.TestCase):
+    """网页和命令行说不一样的话, 用户就再也不信任何一边。"""
+
+    def test_snapshot_is_the_status_payload(self):
+        import synapse as S
+        sentinel = {"marker": "status-payload"}
+        old = S._status_payload
+        S._status_payload = lambda *a, **k: sentinel
+        try:
+            self.assertIs(S._ui_api(7.0)["snapshot"](), sentinel)
+        finally:
+            S._status_payload = old
+
+    def test_check_delegates_to_the_cli_path(self):
+        import synapse as S
+        import importlib
+        seen = []
+        old = S.main
+        S.main = lambda argv, out=None, err=None: (
+            seen.append(argv), out.write('{"summary": {"total": 1}}'), 0)[-1]
+        try:
+            r = S._ui_api()["check"]("kool", "gpt-x")
+            self.assertEqual(seen[0][0], "check")
+            self.assertIn("--target", seen[0])
+            self.assertIn("kool", seen[0])
+            self.assertIn("gpt-x", seen[0])
+            self.assertEqual(r["summary"]["total"], 1)
+        finally:
+            S.main = old
+
+    def test_toggle_writes_config_with_backup_and_preserves_fields(self):
+        import synapse as S
+        cfg = {"targets": {"kool": {"enabled": True, "base_url": "https://x/v1",
+                                    "api_key": "sk-keepme", "default": True}},
+               "handwritten": {"note": "别动我"}}
+        S.save_json(S.CONFIG, cfg)
+        r = S._ui_api()["toggle"]("kool", False)
+        self.assertTrue(r["changed"])
+        self.assertTrue(os.path.exists(r["backup"]))
+        self.assertEqual(stat.S_IMODE(os.stat(r["backup"]).st_mode), 0o600)
+        back = json.load(open(S.CONFIG, encoding="utf-8"))
+        self.assertFalse(back["targets"]["kool"]["enabled"])
+        self.assertEqual(back["targets"]["kool"]["base_url"], "https://x/v1")
+        self.assertEqual(back["targets"]["kool"]["api_key"], "sk-keepme")
+        self.assertEqual(back["handwritten"], {"note": "别动我"})
+
+    def test_json_emit_is_flushed(self):
+        """ui --json 之后进程还要一直跑: 不 flush 的话调用方永远读不到 URL。
+
+        任何"先吐 JSON 再阻塞"的命令都踩这个坑, 所以在 Ctx 层修, 不是给 ui 打补丁。
+        这里真的读一次管道: 没有 flush 时 select 会一直等到超时。
+        """
+        import select
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "synapse.py"),
+             "ui", "--json", "--port", "0", "--no-browser"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={**os.environ, "SYNAPSE_HOME": _TESTS_TMP})
+        try:
+            ready, _, _ = select.select([proc.stdout], [], [], 15)
+            self.assertTrue(ready, "15 秒内一个字节都没吐出来 —— JSON 没 flush")
+            got = ""
+            for _ in range(40):                 # JSON 是多行的, 别只读第一行
+                ln = proc.stdout.readline()
+                if not ln:
+                    break
+                got += ln
+                if '"url"' in got:
+                    break
+            self.assertIn('"url"', got)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill(); proc.wait(timeout=10)
+
+    def test_toggle_unknown_target_is_a_user_error(self):
+        import synapse as S
+        S.save_json(S.CONFIG, {"targets": {"kool": {"enabled": True}}})
+        with self.assertRaises(ValueError) as cm:
+            S._ui_api()["toggle"]("koool", False)
+        self.assertIn("你是不是想", str(cm.exception))
+
+
+class TestUiPackaging(unittest.TestCase):
+    """UI 模块不加进 build-deb.sh, 装完的包跑 `synapse ui` 就是 ModuleNotFoundError。"""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def test_build_script_ships_ui_module(self):
+        build = open(os.path.join(self.ROOT, "build-deb.sh"), encoding="utf-8").read()
+        self.assertIn("synapse_ui.py", build)
+
+    def test_ci_also_checks_ui_module(self):
+        ci = open(os.path.join(self.ROOT, ".github", "workflows", "ci.yml"),
+                  encoding="utf-8").read()
+        self.assertIn("synapse_ui.py", ci)
+
+    def test_ui_module_needs_no_third_party_import(self):
+        body = open(os.path.join(self.ROOT, "synapse_ui.py"), encoding="utf-8").read()
+        stdlib = {"json", "os", "threading", "webbrowser", "http", "urllib"}
+        for line in body.splitlines():
+            if line.startswith("import ") or line.startswith("from "):
+                mod = line.split()[1].split(".")[0]
+                self.assertIn(mod, stdlib, f"UI 用了非标准库依赖: {line}")
+
+
 class TestDesktopEntry(unittest.TestCase):
     """装了包却在桌面启动器里搜不到 —— KRunner(GNOME 也一样)只列 .desktop。
 
@@ -1856,10 +2115,19 @@ class TestDesktopEntry(unittest.TestCase):
         self.assertEqual(kv.get("Terminal"), "true")
         self.assertEqual(kv.get("Icon"), "synapse")
 
-    def test_exec_actually_runs_synapse_status(self):
+    def test_main_entry_opens_the_ui(self):
+        """用户要的是"有 UI 的软件": 主入口必须打开控制台, 不是一堆终端文字。"""
         kv = self._kv()
-        self.assertIn("synapse status", kv.get("Exec", ""),
-                      "Exec 必须真的调用 synapse status")
+        self.assertIn("synapse ui", kv.get("Exec", ""))
+
+    def test_terminal_status_entry_still_available(self):
+        path = os.path.join(self.ROOT, "packaging-src", "desktop", "synapse-status.desktop")
+        self.assertTrue(os.path.exists(path), "还应保留一个纯终端的状态入口")
+        txt = open(path, encoding="utf-8").read()
+        self.assertIn("synapse status", txt)
+        self.assertIn("Terminal=true", txt)
+        build = open(self.BUILD, encoding="utf-8").read()
+        self.assertIn("synapse-status.desktop", build)
 
     def test_searchable_in_chinese_and_english(self):
         kw = self._kv().get("Keywords", "")

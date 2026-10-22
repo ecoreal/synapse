@@ -13,9 +13,11 @@ import concurrent.futures as futures
 import datetime
 import difflib
 import http.client
+import io
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import ssl
@@ -43,7 +45,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.29.0"
+__version__ = "1.30.0"
 
 
 def _init_home():
@@ -335,7 +337,9 @@ class Ctx:
         print(*a, **kw)
 
     def emit(self, text):
-        print(text, file=self.out)
+        # flush 是必须的: 输出被重定向到管道/文件时是块缓冲, 而 ui 这类命令
+        # 吐完 JSON 还要一直跑 —— 不 flush 就等于"命令没有任何输出"。
+        print(text, file=self.out, flush=True)
 
     def json(self, obj):
         self.emit(json.dumps(obj, ensure_ascii=False, indent=2))
@@ -830,6 +834,45 @@ def _last_check(stale_hours=3.0):
             "stale": bool(age is not None and age > stale_hours)}
 
 
+def _status_payload(days=7.0, stale_hours=3.0):
+    """status 的机器可读全量快照。CLI(--json) 和 UI(/api/snapshot) 共用这一份。
+
+    两个入口各算一遍必然漂 —— 用户看到网页和命令行说不一样, 只会得出
+    "这工具的数字不可信"。
+    """
+    cfg = load_config()
+    db = load_issues()
+    snap = _read_state_json(os.path.join(HOME, ".outage.json"), {}) or {}
+    dirty = read_dirty()
+    last = _last_check(stale_hours)
+    up_days = days
+    up_rows, up_used, up_bad = _uptime_stats(up_days)
+    vb = _best_compute(up_days)
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=up_days)) if up_days > 0 else None
+    _stamps = [e[0] for e in _report_entries("check") if cutoff is None or e[0] >= cutoff]
+    last_ts = max(_stamps) if _stamps else None
+    failing = sorted([r for r in up_rows if r["samples"] and r["last_kind"] not in _OK_KINDS],
+                     key=lambda x: (-x["streak"], -_since_hours(x, last_ts)))
+    return {"time": now(), "targets": cfg["targets"], "outage": snap,
+            "dirty": dirty, "issues": db["issues"], "last_check": last,
+            "verdict": {"pick": ({"target": vb["pick"]["target"],
+                                  "model": vb["pick"]["model"],
+                                  "ok_rate": vb["pick"]["ok_rate"],
+                                  "samples": vb["pick"]["samples"]}
+                                 if vb["pick"] else None),
+                        "current_default": vb["current_default"],
+                        "worst": ({"target": failing[0]["target"],
+                                   "model": failing[0]["model"],
+                                   "streak": failing[0]["streak"],
+                                   "since": failing[0]["since"],
+                                   "hours": round(_since_hours(failing[0], last_ts), 2)}
+                                  if failing else None),
+                        "failing": len(failing)},
+            "uptime": {"days": up_days, "reports_used": up_used,
+                       "unreadable_reports": up_bad,
+                       "tally": _uptime_tally(up_rows), "targets": up_rows}}
+
+
 def cmd_status(args, ctx):
     """一览全局: 目标清单 / 脏标记 / 长跑失败统计 / 未解决台账。看板式单次输出。"""
     cfg = load_config()
@@ -846,24 +889,7 @@ def cmd_status(args, ctx):
     failing = sorted([r for r in up_rows if r["samples"] and r["last_kind"] not in _OK_KINDS],
                      key=lambda x: (-x["streak"], -_since_hours(x, last_ts)))
     if args.as_json:
-        ctx.json({"time": now(), "targets": cfg["targets"], "outage": snap,
-                  "dirty": dirty, "issues": db["issues"], "last_check": last,
-                  "verdict": {"pick": ({"target": vb["pick"]["target"],
-                                        "model": vb["pick"]["model"],
-                                        "ok_rate": vb["pick"]["ok_rate"],
-                                        "samples": vb["pick"]["samples"]}
-                                       if vb["pick"] else None),
-                              "current_default": vb["current_default"],
-                              "worst": ({"target": failing[0]["target"],
-                                         "model": failing[0]["model"],
-                                         "streak": failing[0]["streak"],
-                                         "since": failing[0]["since"],
-                                         "hours": round(_since_hours(failing[0], last_ts), 2)}
-                                        if failing else None),
-                              "failing": len(failing)},
-                  "uptime": {"days": up_days, "reports_used": up_used,
-                             "unreadable_reports": up_bad,
-                             "tally": _uptime_tally(up_rows), "targets": up_rows}})
+        ctx.json(_status_payload(up_days, getattr(args, "stale_hours", 3.0)))
         return 0
 
     ctx.say(f"\n=== Synapse 状态  {now()} ===")
@@ -2591,53 +2617,63 @@ def _ensure_units():
     return wrote
 
 
-def _toggle_target(args, ctx, enabled):
-    """只翻转一个目标的 enabled, 其它字段一个字都不动。
+def _set_target_enabled(name, enabled, dry_run=False):
+    """只翻转一个目标的 enabled, 其它字段一个字都不动。CLI 与 UI 共用。
 
     以前体检建议直接写在文案里: "在 config.json 把 X 的 enabled 改 false"。
     那是一份 0600 的 1.6KB JSON、9 个站, 逗号错一个整份配置就读不出来,
     而且手改不留备份 —— 而我们自己在 sync-stations 里刚警告过"别手改 config"。
+
+    用户可修复的问题(没有配置/没有这个目标)抛 ValueError, 由调用方决定怎么呈现。
     """
-    want = "enabled" if enabled else "disabled"
-    name = args.target
     if not os.path.exists(CONFIG):
-        ctx.die(f"[!] 缺少 {CONFIG}, 先运行: {CMD} import-from-pi")
+        raise ValueError(f"缺少 {CONFIG}, 先运行: {CMD} import-from-pi")
     cfg = _read_user_json(CONFIG, None)
     targets = (cfg or {}).get("targets") if isinstance(cfg, dict) else None
     if not targets:
-        ctx.die(f"[!] {CONFIG} 里没有任何目标, 先运行: {CMD} sync-stations 或 {CMD} import-from-pi")
+        raise ValueError(f"{CONFIG} 里没有任何目标, 先运行: {CMD} sync-stations 或 {CMD} import-from-pi")
     if name not in targets:
         close = difflib.get_close_matches(name, sorted(targets), n=3, cutoff=0.5)
         tip = f"; 你是不是想: {', '.join(close)}" if close else ""
-        ctx.die(f"[!] 配置里没有目标 {name}{tip}\n"
-                f"    现有: {', '.join(sorted(targets))}")
+        raise ValueError(f"配置里没有目标 {name}{tip}\n    现有: {', '.join(sorted(targets))}")
     cur = bool(targets[name].get("enabled", True))
     if cur == bool(enabled):
-        ctx.say(f"[i] {name} 本来就是 {want}, 什么都没改")
-        if ctx.as_json:
-            ctx.json({"target": name, "changed": False, "enabled": cur})
-        return 0
-    if getattr(args, "dry_run", False):
-        ctx.say(f"[预览] 会把 {name} 标成 {want} (配置未改动)")
-        ctx.say(f"    确认: {CMD} {'enable' if enabled else 'disable'} {name}")
-        if ctx.as_json:
-            ctx.json({"target": name, "changed": False, "dry_run": True,
-                      "would_set_enabled": bool(enabled)})
-        return 0
+        return {"target": name, "changed": False, "enabled": cur}
+    if dry_run:
+        return {"target": name, "changed": False, "dry_run": True,
+                "would_set_enabled": bool(enabled)}
     backup = f"{CONFIG}.bak.{time.strftime('%Y%m%d-%H%M%S')}"
     try:
         shutil.copy2(CONFIG, backup)
         chmod_private(backup)
     except OSError as e:
-        ctx.die(f"[!] 备份失败, 不敢改配置: {e}")
+        raise ValueError(f"备份失败, 不敢改配置: {e}")
     targets[name]["enabled"] = bool(enabled)
     save_json(CONFIG, cfg)
+    return {"target": name, "changed": True, "enabled": bool(enabled), "backup": backup}
+
+
+def _toggle_target(args, ctx, enabled):
+    want = "enabled" if enabled else "disabled"
+    name = args.target
+    try:
+        r = _set_target_enabled(name, enabled, getattr(args, "dry_run", False))
+    except ValueError as e:
+        ctx.die(f"[!] {e}")
+    if not r["changed"]:
+        if r.get("dry_run"):
+            ctx.say(f"[预览] 会把 {name} 标成 {want} (配置未改动)")
+            ctx.say(f"    确认: {CMD} {'enable' if enabled else 'disable'} {name}")
+        else:
+            ctx.say(f"[i] {name} 本来就是 {want}, 什么都没改")
+        if ctx.as_json:
+            ctx.json(r)
+        return 0
     if ctx.as_json:
-        ctx.json({"target": name, "changed": True, "enabled": bool(enabled),
-                  "backup": backup})
+        ctx.json(r)
         return 0
     ctx.say(f"[完成] {name} → {want}")
-    ctx.say(f"    备份: {backup}")
+    ctx.say(f"    备份: {r['backup']}")
     other = "enable" if not enabled else "disable"
     ctx.say(f"    改回来: {CMD} {other} {name}")
     return 0
@@ -2649,6 +2685,72 @@ def cmd_disable(args, ctx):
 
 def cmd_enable(args, ctx):
     return _toggle_target(args, ctx, True)
+
+
+def _ui_api(days=7.0):
+    """本地 Web UI 需要的三个动作。全部转调已有实现, 不另算一遍。
+
+    check 走的是命令行自己那条路(main(["check", ...])), 所以网页上按"体检"
+    和终端里敲 check 产生的报告、台账、脏标记完全一致 —— 不会出现
+    "网页说异常 3 项, 命令行说 0 项"这种让人不再信任任何一边的情况。
+    """
+    def snapshot():
+        return _status_payload(days)
+
+    def check(target=None, model=None):
+        argv = ["check", "--json"]
+        if target:
+            argv += ["--target", target]
+        if model:
+            argv += ["--model", model]
+        out, err = io.StringIO(), io.StringIO()
+        rc = main(argv, out=out, err=err)
+        raw = out.getvalue().strip()
+        if rc != 0 or not raw:
+            msg = err.getvalue().strip() or f"check 退出码 {rc}"
+            raise ValueError(msg)
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise ValueError("check 的输出不是合法 JSON")
+
+    def toggle(name, enabled):
+        return _set_target_enabled(name, bool(enabled))
+
+    return {"snapshot": snapshot, "check": check, "toggle": toggle}
+
+
+def cmd_ui(args, ctx):
+    """起一个只绑 127.0.0.1 的本地网页控制台, 并把浏览器打开。"""
+    import synapse_ui as ui
+
+    token = secrets.token_urlsafe(16)
+    api = _ui_api(getattr(args, "days", 7.0))
+    for k in ("check", "toggle"):
+        api[k] = ui.locked(api[k])         # 两轮体检并发会互相覆盖报告与台账
+    try:
+        srv, url = ui.make_server(api, token, port=getattr(args, "port", 0))
+    except OSError as e:
+        ctx.die(f"[!] 起不来本地服务: {e}")
+    port = srv.server_address[1]
+    if ctx.as_json:
+        ctx.json({"url": url, "port": port})
+    else:
+        ctx.say(f"\n=== Synapse 控制台  {now()} ===")
+        ctx.say(f"  地址: {url}")
+        ctx.say("  只绑 127.0.0.1, 所有请求都要 token(防止本机其它网页替你改配置)")
+        ctx.say(f"  停止: Ctrl-C   命令行等价物: {CMD} status / {CMD} check / {CMD} disable")
+    if not getattr(args, "no_browser", False):
+        if not ui.open_browser(url) and not ctx.as_json:
+            ctx.say("  (没能自动打开浏览器, 手动把上面的地址粘进去)")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        if not ctx.as_json:
+            ctx.say("\n[停止] 控制台已关闭")
+    finally:
+        srv.server_close()
+    return 0
 
 
 def cmd_timer(args, ctx):
@@ -2891,6 +2993,13 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true", help="只预览, 不写配置")
     p.add_argument("--json", dest="as_json", action="store_true")
     p.set_defaults(fn=cmd_enable)
+
+    p = sub.add_parser("ui", help="打开本地网页控制台(只绑 127.0.0.1, 零依赖)")
+    p.add_argument("--port", type=int, default=0, help="监听端口(默认随机空闲端口)")
+    p.add_argument("--days", type=float, default=7.0, help="稳定性窗口天数")
+    p.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    p.add_argument("--json", dest="as_json", action="store_true")
+    p.set_defaults(fn=cmd_ui)
 
     p = sub.add_parser("cron", help="用 crontab 做定期检查")
     p.add_argument("--schedule", default="0 * * * *")

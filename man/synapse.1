@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.29.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.30.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -59,6 +59,23 @@ list 支持 \-\-json 输出 {total, open, filter, issues}。
 .ad l
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
 .TP
+.SH ui: 本地网页控制台
+.TP
+.B ui
+起一个只绑 \fB127.0.0.1\fR 的控制台, 并打开浏览器。
+选项: \fB\-\-port N\fR(默认随机空闲端口), \fB\-\-days N\fR(稳定性窗口, 默认 7),
+\fB\-\-no-browser\fR, \fB\-\-json\fR(只打印 URL, 便于脚本/嵌入)。
+.PP
+为什么是网页而不是 Electron/Qt: Synapse 的硬约束是零第三方依赖。
+页面是自包含单文件(无 CDN、无外部字体), 数据来自 \fBsynapse status \-\-json\fR
+同一份计算 —— 网页与命令行不会各说一套。
+.PP
+安全: 只绑回环; \fB每个请求(含首页)都要 token\fR, 否则本机其它网页可以用
+\fB<img src=http://127.0.0.1:PORT/api/target?...>\fR 这种 CSRF 花招改配置。
+.PP
+"停用/启用"按钮走的是 \fBsynapse disable/enable\fR 同一个实现(先备份,
+只翻 enabled), "立即体检"走的是 \fBsynapse check\fR 同一条路径。
+.PP
 .SH 桌面启动器入口
 包里有 \fB/usr/share/applications/synapse.desktop\fR 与 hicolor 图标。
 .PP

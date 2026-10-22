@@ -1,3 +1,19 @@
+synapse (1.30.0) unstable; urgency=medium
+
+  * 新增图形界面: synapse ui(本地网页控制台, 零第三方依赖)
+    - 只用标准库 http.server; 页面自包含, 无 CDN/外部字体, 断网可用
+    - 结论先行横幅 + 卡片 + 目标清单 + 长期稳定性 + 未解决台账
+    - "停用/启用"与"立即体检"分别转调 disable/enable 与 check 的同一条实现
+    - 只绑 127.0.0.1, 所有请求(含首页)都要 token, 防本机 CSRF 改配置
+    - 体检动作串行化: 两轮并发会互相覆盖报告与台账
+  * 抽出 _status_payload(): status --json 与 /api/snapshot 共用一份计算
+  * 抽出 _set_target_enabled(): CLI 与 UI 共用, 先备份只翻 enabled
+  * 修 Ctx.emit() 不 flush: "先吐 JSON 再阻塞"的命令输出拿不到
+  * 启动器主入口改为打开控制台, 另留 synapse-status.desktop 终端入口
+  * 新测试 20 项; 测试 223 -> 243
+
+ -- ec <ec@localhost>  Thu, 22 Oct 2026 19:20:00 +0800
+
 synapse (1.29.0) unstable; urgency=medium
 
   * 新增桌面启动器入口(KRunner / GNOME 启动器可搜索)

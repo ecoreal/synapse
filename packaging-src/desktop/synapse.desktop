@@ -1,15 +1,15 @@
 [Desktop Entry]
 Type=Application
 Name=Synapse
-Name[zh_CN]=Synapse 中转站体检
+Name[zh_CN]=Synapse 控制台
 GenericName=Relay Connectivity Monitor
-GenericName[zh_CN]=模型中转站连通性监控
-Comment=Check pi relay stations and tell you what to do next
-Comment[zh_CN]=检查 pi 中转站连通性、长跑失败趋势, 并给出下一步该敲什么命令
-# Terminal=true: 不给终端就等于"点了没反应"
-Exec=sh -c "synapse status; echo; echo 按回车键关闭窗口; read -r _"
+GenericName[zh_CN]=模型中转站连通性监控台
+Comment=Local web console: check stations, see what is failing, fix it
+Comment[zh_CN]=本地网页控制台: 体检中转站、看谁在挂、一条命令就能修
+# 这个窗口就是服务本体: 关掉窗口 = 关掉控制台, 所以要留着等回车
+Exec=sh -c "synapse ui; echo; echo 控制台已停止, 按回车关闭窗口; read -r _"
 Icon=synapse
 Terminal=true
 Categories=System;Monitor;
-Keywords=synapse;relay;pi;api;monitor;status;uptime;体检;中转站;监控;模型;诊断;
+Keywords=synapse;relay;pi;api;monitor;status;uptime;ui;console;体检;中转站;监控;模型;诊断;控制台;
 StartupNotify=false
