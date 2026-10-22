@@ -101,6 +101,21 @@ synapse doctor --fix --apply    # 真改，然后复查
 `sk-`/`Bearer`/`api_key` 字段一律遮蔽，但保留 `401 invalid api key` 这类足以定位问题的字眼。
 报告与仪表盘统一 0600；历史文件由 `doctor` 扫描（含疑似密钥或权限过宽都会警告）。
 
+## `sync-stations` 会重写整份 config.json
+
+`sync-stations` 用 `STATIONS.md` 整体重写 `config.json`——连 `--default` 改一个标志位也是重写整份。而从 1.17.0 起 `best`/`status` 会劝你敲这条命令（默认站和推荐站不一致时），所以它必须安全：
+
+- **写盘前自动备份** `config.json.bak.<时间戳>`（0600，里面有明文 key）；备份失败就拒绝重写
+- **会移除目标时单独一块列出**，并给出退回命令。因为 `import-from-pi` 建出来的目标不在 `STATIONS.md` 里，一次 sync 就会静默消失
+- **`--dry-run`** 只打印会怎么改，不写盘
+
+```
+$ synapse sync-stations --default tierflow --dry-run
+[预览] 将用 .../STATIONS.md 重写 .../config.json, 未写盘
+  站数: 9 → 9  变更: hyb, tierflow
+  确认要写: synapse sync-stations
+```
+
 ## 文件权限：每个文件，不只 config.json
 
 我们写的每个文件都只有本人可读（0600）：`config.json`、`issues.json`、`.outage.json`、`.targets_snapshot.json`、`STATIONS.md`、`reports/*.json`，以及 `fix --apply` 写出的 `models.json.bak.*`。
@@ -380,7 +395,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 190 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 193 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.22.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.23.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -59,6 +59,19 @@ list 支持 \-\-json 输出 {total, open, filter, issues}。
 .ad l
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
 .TP
+.SH sync\-stations 会重写 config.json
+\fBsync\-stations\fR 用 \fBSTATIONS.md\fR 整体重写 \fBconfig.json\fR —— 连
+\fB\-\-default\fR 改一个标志位也是重写整份。而 \fBbest\fR / \fBstatus\fR
+现在会劝用户敲这条命令, 所以它必须安全:
+.IP \(bu 2
+写盘前自动备份 \fBconfig.json.bak.<时间戳>\fR (0600, 里面有明文 key);
+    备份失败就拒绝重写
+.IP \(bu 2
+会移除目标时单独一块列出, 并给出退回命令; 因为 \fBimport\-from\-pi\fR 建出来的
+    目标不在 \fBSTATIONS.md\fR 里, 一次 sync 就会静默消失
+.IP \(bu 2
+\fB\-\-dry\-run\fR 只打印会怎么改, 不写盘
+.PP
 .SH 文件权限
 我们写的每个文件都只有本人可读(\fB0600\fR), 不只 config.json:
 数据文件(\fBconfig.json\fR / \fBissues.json\fR / \fB.outage.json\fR /

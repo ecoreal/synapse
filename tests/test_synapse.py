@@ -1579,6 +1579,70 @@ class TestDataFilePermissions(unittest.TestCase):
         self.assertIn("models.json.bak", text)
         self.assertIn("0644", text)
 
+class TestSyncStationsSafety(unittest.TestCase):
+    """sync-stations 会用 STATIONS.md 整体重写 config.json —— 而 best/status 现在
+    反复劝用户敲 `sync-stations --default X`, 为改一个标志位重写整份配置。
+
+    危险场景真实存在: import-from-pi 直接把 pi 的 provider 写进 config.json,
+    这些站不在 STATIONS.md 里; 之后再跑一次 sync 就静默移除它们。没有备份。
+    工具自己推荐的动作, 不该悄悄丢数据。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD", "STATIONS")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.STATIONS = os.path.join(self.tmp, "STATIONS.md")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+        with open(synapse.STATIONS, "w", encoding="utf-8") as f:
+            f.write("| 名字 | Base URL | API Key | 模型 |\n|---|---|---|---|\n"
+                    "| keep | https://keep.invalid | pi:keep | m1 |\n")
+        synapse.save_json(synapse.CONFIG, {"targets": {
+            "keep": {"base_url": "https://keep.invalid", "key_from_pi": "keep",
+                     "models": ["m1"], "enabled": True, "default": True},
+            "from_pi": {"base_url": "https://pi.invalid", "key_from_pi": "from_pi",
+                        "models": ["m2"], "enabled": True}}})
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _run(self, *argv):
+        self.out.seek(0); self.out.truncate(0)
+        return synapse.main(list(argv), out=self.out, err=self.err)
+
+    def test_backs_up_config_before_rewriting(self):
+        self._run("sync-stations")
+        baks = [n for n in os.listdir(synapse.HOME) if "config.json.bak." in n]
+        self.assertEqual(len(baks), 1, "重写 config 前没有留备份")
+        path = os.path.join(synapse.HOME, baks[0])
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600,
+                         "备份里有明文 key, 必须 0600")
+
+    def test_warns_loudly_when_a_target_would_disappear(self):
+        self._run("sync-stations")
+        text = self.out.getvalue()
+        self.assertIn("from_pi", text)
+        self.assertIn("移除", text)
+        self.assertIn("恢复", text)          # 告诉人怎么退回去, 而不只是报告"已删"
+
+    def test_dry_run_changes_nothing(self):
+        before = open(synapse.CONFIG, encoding="utf-8").read()
+        rc = self._run("sync-stations", "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertEqual(open(synapse.CONFIG, encoding="utf-8").read(), before,
+                         "--dry-run 居然写了配置")
+        self.assertIn("from_pi", self.out.getvalue())
+
 
 class TestDocsConsistency(unittest.TestCase):
     """文档里的版本号必须和代码一致。

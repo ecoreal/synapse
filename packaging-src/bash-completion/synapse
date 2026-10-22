@@ -30,7 +30,7 @@ _synapse_completions() {
             opts="add list note status rm --target --model --kind --symptom --cause --plan --text --id --new-status --status --filter --json"
             ;;
         sync-stations)
-            opts="--default --check --tools --cache --vision --image-file --timeout --jobs -v --verbose --log"
+            opts="--default --dry-run --check --tools --cache --vision --image-file --timeout --jobs -v --verbose --log"
             ;;
         cron)
             opts="--schedule --install"

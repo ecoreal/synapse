@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.22.0"
+__version__ = "1.23.0"
 
 
 def _init_home():
@@ -2242,6 +2242,32 @@ def cmd_sync_stations(args, ctx):
     removed = [n for n in oldt if n not in new["targets"]]
     changed = [n for n in new["targets"] if n in oldt and oldt[n] != new["targets"][n]]
 
+    # 这个子命令会用 STATIONS.md 整体重写 config.json。而 best/status 现在会劝用户
+    # 敲 "sync-stations --default X" —— 为一个标志位重写整份配置。若用户曾用
+    # import-from-pi 把 pi 的 provider 直接写进 config, 那些站不在 markdown 里,
+    # 一次 sync 就静默消失。所以: 写盘前先备份, 移除时大声说, 并给出退回路径。
+    if getattr(args, "dry_run", False):
+        ctx.say(f"[预览] 将用 {STATIONS} 重写 {CONFIG}, 未写盘")
+        ctx.say(f"  站数: {len(oldt)} → {len(new['targets'])}"
+                + (f"  新增: {', '.join(added)}" if added else "")
+                + (f"  移除: {', '.join(removed)}" if removed else "")
+                + (f"  变更: {', '.join(changed)}" if changed else ""))
+        if removed:
+            ctx.say(f"[!] 以下目标会被删掉: {', '.join(removed)}")
+        ctx.say(f"  确认要写: {CMD} sync-stations")
+        return 0
+
+    if os.path.exists(CONFIG):
+        backup = CONFIG + f".bak.{datetime.datetime.now():%Y%m%d-%H%M%S}"
+        try:
+            import shutil
+            shutil.copy2(CONFIG, backup)
+            chmod_private(backup)        # 里面有明文 key
+        except OSError as e:
+            ctx.die(f"[!] 无法备份 {CONFIG}({e}) —— 拒绝在无备份的情况下重写")
+    else:
+        backup = None
+
     save_json(CONFIG, new)
     chmod_private(CONFIG)
     ctx.say(f"[同步] {STATIONS} → {CONFIG}")
@@ -2249,6 +2275,12 @@ def cmd_sync_stations(args, ctx):
           + (f"  新增: {', '.join(added)}" if added else "")
           + (f"  移除: {', '.join(removed)}" if removed else "")
           + (f"  变更: {', '.join(changed)}" if changed else ""))
+    if removed:
+        ctx.say(f"\n[!] 这些目标在 STATIONS.md 里没有, 已从 config 移除: {', '.join(removed)}")
+        ctx.say(f"    如果这是意外的(比如它们是 import-from-pi 建出来的), 恢复: "
+                f"cp {backup} {CONFIG}")
+        ctx.say(f"    想保留就把它们补进 {STATIONS}: 加一行即可, 不必手改 config.json")
+
     for n in added + changed + removed:
         mark_dirty(f"sync-stations 导致目标清单变更: {n}")
 
@@ -2709,6 +2741,8 @@ def build_parser():
     p = sub.add_parser("sync-stations",
                        help="从 STATIONS.md 同步站清单到 config.json(你的 markdown 是数据源)")
     p.add_argument("--default", help="指定默认站(名字)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="只预览会怎么改 config.json, 不写盘")
     p.add_argument("--check", action="store_true", help="同步后立刻体检")
     p.add_argument("--tools", action="store_true")
     p.add_argument("--cache", action="store_true")

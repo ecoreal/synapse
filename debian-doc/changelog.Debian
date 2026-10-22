@@ -1,3 +1,15 @@
+synapse (1.23.0) unstable; urgency=medium
+
+  * sync-stations: 写盘前自动备份 config.json, 移除目标时大声说明并可退回
+    - 该子命令用 STATIONS.md 整体重写 config.json; 连 --default 改一个标志位
+      也重写整份, 而 best/status 现在会劝用户敲它
+    - import-from-pi 建出来的目标不在 STATIONS.md 里, 一次 sync 静默消失
+    - 备份 config.json.bak.<ts> 为 0600; 备份失败则拒绝重写
+  * sync-stations --dry-run: 只打印会怎么改, 不写盘
+  * 新测试 3 项(备份/移除警告/dry-run); 测试 190 -> 193
+
+ -- ec <ec@localhost>  Thu, 22 Oct 2026 12:40:00 +0800
+
 synapse (1.22.0) unstable; urgency=medium
 
   * 文件权限统一到 0600, 覆盖我们自己写的每一个文件
