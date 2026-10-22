@@ -41,7 +41,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.20.0"
+__version__ = "1.21.0"
 
 
 def _init_home():
@@ -904,12 +904,12 @@ def cmd_status(args, ctx):
     else:
         parts = [f"{k} {v}" for k, v in tally.items() if v]
         ctx.say(f"\n[长期稳定性] 最近 {up_days:g} 天 / {up_used} 份全量报告: "
-                f"{' · '.join(parts)}")
+                f"{' · '.join(parts)}   (口径: 仅全量轮)")
         worst = [r for r in up_rows if r["samples"] >= 5][:3]
         for r in worst:
             why = "、".join(f"{x['kind']}×{x['count']}" for x in r["reasons"][:2])
             ctx.say(f"  {r['target']}/{r['model']}  {r['ok_rate'] * 100:.0f}%"
-                    f" 连败{r['longest_streak']}" + (f" ({why})" if why else ""))
+                    f" 最长连败{r['longest_streak']}" + (f" ({why})" if why else ""))
         if any(r["internal_errors"] for r in up_rows):
             n = sum(r["internal_errors"] for r in up_rows)
             ctx.say(f"  🐞 另有 {n} 次 Synapse 内部错误, 已排除在可用率之外")
@@ -917,7 +917,7 @@ def cmd_status(args, ctx):
             ctx.say(f"  [!] 另有 {up_bad} 份报告无法读取(已跳过)")
         ctx.say(f"  详情: {CMD} uptime --days {up_days:g} / --by-station 看站级汇总")
 
-    ctx.say("\n[长跑失败统计] (.outage.json, 由 check 累计)")
+    ctx.say("\n[长跑失败统计] (.outage.json, 由 check 累计; 口径: 含定向抽查)")
     if not snap:
         ctx.say("  (还没有数据, 先跑几次 check/watch)")
     else:
@@ -927,6 +927,23 @@ def cmd_status(args, ctx):
             flag = "🔴" if st.get("streak", 0) >= 2 else ("🟡" if st.get("fail") else "🟢")
             ctx.say(f"  {flag} {t:<12} {m:<28} ok={st.get('ok', 0):<4} fail={st.get('fail', 0):<4}"
                   f"连败={st.get('streak', 0):<3} 最近={st.get('last_kind', '')}")
+
+        # 两个"连败"数并存时必须解释差额: 同一对目标/模型, 一个说 17 一个说 12,
+        # 用户只会得出"这工具的数字不可信"。差额来自口径(是否计入定向抽查)。
+        by_key = {(r["target"], r["model"]): r for r in up_rows}
+        diffs = []
+        for key, st in snap.items():
+            t, m = key.split("||", 1)
+            r = by_key.get((t, m))
+            if not r:
+                continue
+            if r["streak"] != st.get("streak", 0):
+                diffs.append((t, m, r["streak"], st.get("streak", 0)))
+        if diffs:
+            t, m, a, b = diffs[0]
+            ctx.say(f"\n  (i) 连败数有两个口径, 别混着看: 全量轮 {a} / 累计含定向抽查 {b}"
+                    f" (如 {t}/{m})")
+            ctx.say(f"      判断「要不要换站」一律用全量轮: {CMD} timeline 或 {CMD} best")
 
     ctx.say(f"\n[问题台账] 未解决 {sum(1 for i in db['issues'] if i['status'] in ('open', 'doing'))} 条")
     for i in db["issues"]:

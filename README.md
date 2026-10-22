@@ -21,6 +21,22 @@ pi 模型中转站的连通性监控 / 诊断 / 配置修复工具。
 > 源码目录里若还有旧数据文件，首次运行会自动复制迁移过去，原文件保留。
 > 装 Debian 包后命令就是 `synapse`（不再需要 `python3 synapse.py`）。
 
+### 两个「连败」：口径不同，别混着看
+
+`status` 里有两块统计都报连败，数字可能不一样，**两个都对**：
+
+| 位置 | 口径 | 回答的问题 |
+|---|---|---|
+| `[长期稳定性]` | 仅全量轮，窗口内，报**最长**连败 | 这周到底稳不稳 |
+| `[长跑失败统计]` | `.outage.json` 累计，**含**定向抽查，不限窗口，报**当前**连败 | 这一刻还在不在坏 |
+
+真实数据上 hyb/deepseek-v4.1-flash 一个说 17、一个说 12。并列展示却共用「连败」这个词，只会让人得出「这工具的数字不可信」。所以两块各自在标题声明口径，差额存在时补一句：
+
+```
+(i) 连败数有两个口径, 别混着看: 全量轮 17 / 累计含定向抽查 12 (如 hyb/deepseek-v4.1-flash)
+    判断「要不要换站」一律用全量轮: synapse timeline 或 synapse best
+```
+
 ### 诊断完就动手: `synapse doctor --fix`
 
 `doctor` 指出「38 份报告是 0664」之后，别让人自己去 chmod：
@@ -356,7 +372,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 184 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 186 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

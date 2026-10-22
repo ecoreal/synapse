@@ -1,4 +1,4 @@
-.TH SYNAPSE 1 "2026-10-21" "synapse 1.20.0" "User Commands"
+.TH SYNAPSE 1 "2026-10-21" "synapse 1.21.0" "User Commands"
 .\" 中文没有词间空格, troff 无法两端对齐会报 "cannot adjust line"; 左对齐更干净
 .SH 名称
 synapse \- pi 模型中转站连通性监控/诊断/配置修复工具
@@ -59,6 +59,20 @@ list 支持 \-\-json 输出 {total, open, filter, issues}。
 .ad l
 从 STATIONS.md 同步站清单到 config.json(markdown 是数据源)。
 .TP
+.SH 两个"连败"
+\fBstatus\fR 里有两块统计都报连败, 口径不同, 都"对":
+.IP \(bu 2
+\fB长期稳定性\fR: 只数\fB全量轮\fR(\fBcheck\fR 无 \fB\-\-target\fR/\fB\-\-model\fR),
+     窗口受限; 报"最长连败"。"这周到底稳不稳"
+.IP \(bu 2
+\fB长跑失败统计\fR: \fB.outage.json\fR 累计, \fB含定向抽查\fR,
+     不限窗口; 报"当前连败"。"这一刻还在不在坏"
+.PP
+真实数据上同一对 目标/模型 一个说 17、一个说 12 —— 两个数并列却共用"连败"
+这个词, 用户只会得出"这工具的数字不可信"。所以两块各自在标题里声明口径,
+差额存在时再补一句解释, 并指明\fB判断要不要换站一律用全量轮\fR
+(\fBtimeline\fR / \fBbest\fR 都是全量轮口径)。
+
 .B doctor
 .ad l
 自检: 诊断 Synapse 自己(只读, 不联网)。检查数据目录是否落在代码目录里、

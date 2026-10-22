@@ -1350,6 +1350,71 @@ def _completion_opts_blocks():
                     blocks[name] = m.group(1).split()
             pending = None
     return blocks
+class TestStreakScope(unittest.TestCase):
+    """status 同一屏会给出两个"连败"数: 长期稳定性(全量轮) 与 长跑统计(含定向抽查)。
+
+    真实数据上同一对 目标/模型 一个说 17、一个说 12 —— 都"对", 但标签一模一样。
+    用户看到两个不同的数只会得出一个结论: 这工具的数字不可信。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k)
+                       for k in ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        os.makedirs(synapse.REPORTS)
+        self.out, self.err = io.StringIO(), io.StringIO()
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {
+            "enabled": True, "models": ["m1"], "default": True}}})
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def test_both_streak_numbers_declare_their_scope(self):
+        # 全量轮: 3 连败
+        for i in range(3):
+            payload = {"time": f"2026-10-0{i + 1} 10:00:00", "partial": False,
+                       "summary": {}, "results": [
+                           {"target": "t", "model": "m1", "test": "basic",
+                            "kind": "timeout", "http": 0, "latency_ms": 0,
+                            "snippet": ""}]}
+            synapse.save_json(os.path.join(synapse.REPORTS,
+                                           f"check-2026100{i + 1}-100000.json"), payload)
+        # 长跑统计: 5 连败(含两次定向抽查)
+        synapse.save_json(os.path.join(synapse.HOME, ".outage.json"),
+                          {"t||m1": {"ok": 0, "fail": 5, "streak": 5,
+                                     "last": "2026-10-03 10:00:00",
+                                     "last_kind": "timeout"}})
+        synapse.main(["status", "--days", "0"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertIn("仅全量轮", text)      # 长期稳定性那一块
+        self.assertIn("含定向抽查", text)    # 长跑统计那一块
+        # 差从哪来必须当面解释, 而不是让用户自己猜 —— 两个数都"对", 但含义不同
+        self.assertIn("别混着看", text)
+        self.assertIn("全量轮 3", text)
+        self.assertIn("含定向抽查 5", text)
+
+    def test_no_scope_noise_when_numbers_agree(self):
+        payload = {"time": "2026-10-01 10:00:00", "partial": False, "summary": {},
+                   "results": [{"target": "t", "model": "m1", "test": "basic",
+                                "kind": "ok", "http": 200, "latency_ms": 5,
+                                "snippet": ""}]}
+        synapse.save_json(os.path.join(synapse.REPORTS, "check-20261001-100000.json"),
+                          payload)
+        synapse.save_json(os.path.join(synapse.HOME, ".outage.json"),
+                          {"t||m1": {"ok": 1, "fail": 0, "streak": 0,
+                                     "last": "2026-10-01 10:00:00", "last_kind": "ok"}})
+        synapse.main(["status", "--days", "0"], out=self.out, err=self.err)
+        self.assertNotIn("别混着看", self.out.getvalue())
+
 
 class TestDoctorFix(unittest.TestCase):
     """doctor 会指出"38 份报告是世界可读的", 然后呢? 让用户自己去 chmod?

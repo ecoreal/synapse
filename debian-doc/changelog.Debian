@@ -1,3 +1,14 @@
+synapse (1.21.0) unstable; urgency=medium
+
+  * status: 两块"连败"统计各自声明口径, 差额存在时当面解释
+    - 长期稳定性 = 仅全量轮/窗口内/最长连败; 长跑统计 = 累计含定向抽查/当前连败
+    - 真实数据上同一对目标/模型 17 vs 12, 并列却共用"连败"一词 → 引发不信任
+    - 补一句: 判断"要不要换站"一律用全量轮(timeline/best 同口径)
+  * 数字一致时不输出解释行(不制造噪音)
+  * 测试 184 -> 186 项
+
+ -- ec <ec@localhost>  Wed, 21 Oct 2026 23:40:00 +0800
+
 synapse (1.20.0) unstable; urgency=medium
 
   * doctor --fix: 把诊断变成动作(默认预览, --apply 才改)
