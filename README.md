@@ -101,6 +101,14 @@ synapse doctor --fix --apply    # 真改，然后复查
 `sk-`/`Bearer`/`api_key` 字段一律遮蔽，但保留 `401 invalid api key` 这类足以定位问题的字眼。
 报告与仪表盘统一 0600；历史文件由 `doctor` 扫描（含疑似密钥或权限过宽都会警告）。
 
+## 定时器单元里烧死的路径
+
+`timer on` 会把可执行文件路径写进 `ExecStart`，而 `_ensure_units` 见到「单元已存在」就 `continue` —— **永不刷新**。
+
+真实踩到：在源码树里跑 `timer on`（单元里是 `/usr/bin/python3 /path/to/synapse.py`），之后装上 `.deb`。用户目录那份单元**遮蔽**了包里那份，定时器继续跑源码树；仓库一移走，每小时失败一次，只有 journal 里有一行，而工具一直说「已启用」。
+
+现在 `timer on` 会检查已有单元：`ExecStart` 指向的路径不存在，或已装了 `synapse` 却还在跑 `.py` 脚本，才重写（并说明原因）；能跑且没有更好选择时一个字都不动。`timer status` 打印「实际执行」并在有问题时给出修法，`doctor` 增加一项「定时器可执行文件」。
+
 ## 自动结单必须真的「连续」两轮
 
 自动结单的文案是「连续两轮体检均正常」，但旧实现数的是「历史上出现过几条 `[恢复]` 笔记」。于是 `ok` → 失败 → `ok` 会被判成连续两轮，给一个还在抖的站结单。工具在一句自己都不成立的话上结单，比不结单糟得多。
@@ -418,7 +426,7 @@ python3 synapse.py issue status 5 done --text "已修复"
 
 ```bash
 make help      # 列出所有开发目标
-make test      # 203 项回归测试，不联网（带 ResourceWarning 严格模式）
+make test      # 209 项回归测试，不联网（带 ResourceWarning 严格模式）
 make check     # 编译 + 测试，提交前跑这个
 make smoke     # 用临时数据目录跑真实 CLI，不碰你的配置
 make dist      # 先跑测试，通过才出 deb

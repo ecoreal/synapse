@@ -35,7 +35,11 @@ def _isolate_test_paths(root=_TESTS_TMP):
     synapse.ISSUES = os.path.join(root, "issues.json")
     synapse.LOCK = os.path.join(root, ".dirty")
     synapse.PI_MODELS = os.path.join(root, "pi", "models.json")
+    # systemd 用户单元目录也必须隔离: 否则测试会读到(甚至改写)真实用户的
+    # ~/.config/systemd/user/, 而机器上装过的 synapse 单元会让断言随环境漂移。
+    synapse.USER_UNIT_DIR = os.path.join(root, "units")
     os.makedirs(synapse.REPORTS, exist_ok=True)
+    os.makedirs(synapse.USER_UNIT_DIR, exist_ok=True)
 
 
 _isolate_test_paths()
@@ -1818,6 +1822,103 @@ class TestSyncNeverWritesEmptyConfig(unittest.TestCase):
         self.out.seek(0); self.out.truncate(0)
         synapse.main(["sync-stations"], out=self.out, err=self.err)
         self.assertNotIn("站数: 0 → 0", self.out.getvalue())
+
+class TestTimerUnitStaleness(unittest.TestCase):
+    """timer on 写出的单元会把可执行文件路径烧死在里面, 而 _ensure_units 见到
+    "单元已存在" 就 continue —— 永不刷新。
+
+    真实踩到: 在源码树里跑 timer on(单元里写 /usr/bin/python3
+    /home/ec/workspace/Synapse/synapse.py), 之后装上 .deb, 包里的单元被用户目录
+    那份遮蔽, 定时器继续跑源码树。删掉/移走仓库 → 每小时失败一次, 只留在 journal
+    里。工具自己说"已启用", 人不会去看 journal。
+    """
+
+    def setUp(self):
+        import io
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(synapse, k) for k in
+                       ("HOME", "CONFIG", "REPORTS", "ISSUES", "LOCK", "CMD",
+                        "USER_UNIT_DIR", "_systemctl")}
+        synapse.HOME = self.tmp
+        synapse.CONFIG = os.path.join(self.tmp, "config.json")
+        synapse.REPORTS = os.path.join(self.tmp, "reports")
+        synapse.ISSUES = os.path.join(self.tmp, "issues.json")
+        synapse.LOCK = os.path.join(self.tmp, ".dirty")
+        synapse.CMD = "synapse"
+        synapse.USER_UNIT_DIR = os.path.join(self.tmp, "units")
+        os.makedirs(synapse.REPORTS)
+        os.makedirs(synapse.USER_UNIT_DIR)
+        self.out, self.err = io.StringIO(), io.StringIO()
+        synapse._systemctl = lambda *a: (0, "enabled")
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(synapse, k, v)
+
+    def _write_unit(self, exe):
+        path = os.path.join(synapse.USER_UNIT_DIR, synapse.SERVICE_UNIT)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("[Service]\nType=oneshot\nExecStart=" + exe + "\n")
+        return path
+
+    def test_dead_exec_start_is_reported(self):
+        path = self._write_unit("/usr/bin/python3 /gone/synapse.py check")
+        reason = synapse._unit_stale_reason(path)
+        self.assertIsNotNone(reason)
+        self.assertIn("/gone/synapse.py", reason)
+
+    def test_healthy_unit_is_not_stale(self):
+        # 没装 synapse 时(源码树里跑), 指向现存脚本就是健康的。
+        # 这条要钉住"没有已安装版本就别乱改用户单元"。
+        path = self._write_unit(f"/usr/bin/python3 {os.path.abspath(__file__)}")
+        orig = synapse.shutil.which
+        synapse.shutil.which = lambda n: None
+        try:
+            self.assertIsNone(synapse._unit_stale_reason(path))
+        finally:
+            synapse.shutil.which = orig
+
+    def test_source_tree_unit_is_stale_once_installed(self):
+        """装好包之后还跑源码脚本 → 陈旧, 因为仓库一移走监控就静默死掉。"""
+        path = self._write_unit(f"/usr/bin/python3 {os.path.abspath(__file__)}")
+        orig = synapse.shutil.which
+        synapse.shutil.which = lambda n: "/usr/bin/synapse" if n == "synapse" else orig(n)
+        try:
+            reason = synapse._unit_stale_reason(path)
+            self.assertIsNotNone(reason, "装了包却还在跑源码脚本, 应当判为陈旧")
+            self.assertIn("/usr/bin/synapse", reason)
+        finally:
+            synapse.shutil.which = orig
+
+    def test_ensure_units_repairs_a_dead_unit(self):
+        path = self._write_unit("/usr/bin/python3 /gone/synapse.py check")
+        wrote = synapse._ensure_units()
+        self.assertTrue(any(p == path for p, _ in wrote), "坏单元没有被修复")
+        text = open(path, encoding="utf-8").read()
+        self.assertNotIn("/gone/synapse.py", text)
+
+    def test_ensure_units_leaves_a_good_unit_alone(self):
+        path = self._write_unit(f"/usr/bin/python3 {os.path.abspath(__file__)}")
+        before = open(path, encoding="utf-8").read()
+        orig = synapse.shutil.which
+        synapse.shutil.which = lambda n: None
+        try:
+            wrote = synapse._ensure_units()
+        finally:
+            synapse.shutil.which = orig
+        self.assertFalse(any(p == path for p, _ in wrote), "好单元不该被无谓重写")
+        self.assertEqual(open(path, encoding="utf-8").read(), before)
+
+    def test_doctor_says_when_the_timer_points_at_nothing(self):
+        self._write_unit("/usr/bin/python3 /gone/synapse.py check")
+        synapse.save_json(synapse.CONFIG, {"targets": {"t": {
+            "enabled": True, "models": ["m1"], "default": True}}})
+        rc = synapse.main(["doctor"], out=self.out, err=self.err)
+        text = self.out.getvalue()
+        self.assertEqual(rc, 0)                      # 警告不失败
+        self.assertIn("/gone/synapse.py", text)
+        self.assertIn("timer on", text)              # 给出修法
 
 
 class TestDocsConsistency(unittest.TestCase):

@@ -15,6 +15,7 @@ import http.client
 import json
 import os
 import re
+import shlex
 import shutil
 import ssl
 import stat
@@ -41,7 +42,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 PI_DIR = os.path.expanduser("~/.pi/agent")
 PI_MODELS = os.path.join(PI_DIR, "models.json")
 
-__version__ = "1.26.0"
+__version__ = "1.27.0"
 
 
 def _init_home():
@@ -1158,6 +1159,15 @@ def _doctor_checks(stale_hours=3.0):
     scheduled, how = _schedule_status()
     add("ok" if scheduled else "warn", "定期体检", how,
         "" if scheduled else f"启用: {CMD} timer on --interval 1h --now")
+
+    # 5.5 定时器单元指向的可执行文件: 装包/搬家之后最容易断的一根线
+    svc = os.path.join(USER_UNIT_DIR, SERVICE_UNIT)
+    why = _unit_stale_reason(svc) if os.path.exists(svc) else None
+    if why:
+        add("warn", "定时器可执行文件", why,
+            f"{CMD} timer on --interval 1h   (会重写成当前可执行文件)")
+    else:
+        add("ok", "定时器可执行文件", "指向的路径存在")
 
     # 6. 台账: 能解析, 且长期 open 的单要有人处理
     try:
@@ -2509,20 +2519,73 @@ def _unit_present(name):
     return False
 
 
+def _unit_exec_lines(path):
+    """读单元里的 ExecStart= 行, 每行返回 token 列表。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            txt = f.read()
+    except OSError:
+        return []
+    out = []
+    for line in txt.splitlines():
+        line = line.strip()
+        if line.startswith("ExecStart="):
+            try:
+                out.append(shlex.split(line[len("ExecStart="):]))
+            except ValueError:
+                out.append(line[len("ExecStart="):].split())
+    return out
+
+
+def _unit_stale_reason(path):
+    """单元是否已经跑不起来了/该换个可执行文件。没问题返回 None。
+
+    单元把可执行文件路径烧死在 ExecStart 里。真实踩到的坑: 在源码树里跑
+    `timer on`(写成 python3 /path/to/synapse.py), 之后装上 .deb —— 用户目录
+    那份单元遮蔽了包里那份, 定时器继续跑源码树。仓库一移走, 每小时失败一次,
+    只有 journal 里有一行, 工具自己还一直说"已启用"。
+    """
+    if not os.path.exists(path):
+        return None
+    toks = [t for line in _unit_exec_lines(path) for t in line]
+    for t in toks:
+        if t.startswith("-") or not t.startswith("/"):
+            continue
+        if not os.path.exists(t):
+            return f"ExecStart 指向的 {t} 不存在"
+    installed = shutil.which("synapse")
+    if installed and installed not in toks:
+        scripts = [t for t in toks if t.startswith("/") and t.endswith(".py")]
+        if scripts:
+            return f"跑的是源码脚本 {scripts[0]}, 不是已安装的 {installed}"
+    return None
+
+
 def _ensure_units():
-    """确保 systemd 能找到两个单元; 缺则写一份到用户目录。"""
+    """确保 systemd 能找到两个单元; 缺则写, 坏了则修。
+
+    返回 [(path, reason)]; reason 为 None 表示新建, 否则是"为什么要重写"。
+    """
     os.makedirs(USER_UNIT_DIR, exist_ok=True)
     exe = shutil.which("synapse") or os.path.abspath(__file__)
     if not os.access(exe, os.X_OK):
         exe = f"/usr/bin/python3 {exe}"
     wrote = []
     for name, tpl in ((SERVICE_UNIT, UNIT_SERVICE), (TIMER_UNIT, UNIT_TIMER)):
-        if _unit_present(name):
-            continue
         path = os.path.join(USER_UNIT_DIR, name)
+        reason = None
+        if _unit_present(name):
+            # 已存在的单元以前是"永不刷新" —— 装包/搬家之后它就一直指向旧路径。
+            # 只有明确的坏(路径不存在 / 该用已安装的却还在跑源码脚本)才重写,
+            # 不去动用户自己定制过但能跑的东西。
+            if not os.path.exists(path):
+                continue              # 包提供的那份, 不用在用户目录再写一遍
+            reason = _unit_stale_reason(path)
+            if reason is None:
+                continue
         with open(path, "w", encoding="utf-8") as f:
             f.write(tpl.format(exe=exe))
-        wrote.append(path)
+        wrote.append((path, reason))
     return wrote
 
 
@@ -2534,8 +2597,12 @@ def cmd_timer(args, ctx):
         if _systemctl("show-environment")[0] != 0:
             ctx.die("[!] 当前无 systemd 用户会话(容器环境?)，请改用: synapse cron --install")
         wrote = _ensure_units()
-        for p in wrote:
-            ctx.say(f"[i] 已写入单元: {p}")
+        for p, reason in wrote:
+            if reason:
+                ctx.say(f"[修] 已重写单元: {p}")
+                ctx.say(f"     原因: {reason}")
+            else:
+                ctx.say(f"[i] 已写入单元: {p}")
         # 间隔通过 drop-in 覆盖，不动包/用户目录里的 unit 本身
         os.makedirs(os.path.join(USER_UNIT_DIR, f"{TIMER_UNIT}.d"), exist_ok=True)
         with open(os.path.join(USER_UNIT_DIR, f"{TIMER_UNIT}.d", "override.conf"),
@@ -2570,6 +2637,14 @@ def cmd_timer(args, ctx):
     else:  # status
         rc, out = _systemctl("is-enabled", TIMER_UNIT)
         ctx.say(f"{TIMER_UNIT}: {out.strip() or '未安装'}")
+        svc = os.path.join(USER_UNIT_DIR, SERVICE_UNIT)
+        toks = [t for line in _unit_exec_lines(svc) for t in line] if os.path.exists(svc) else []
+        if toks:
+            ctx.say(f"  实际执行: {' '.join(toks)}")
+            why = _unit_stale_reason(svc)
+            if why:
+                ctx.say(f"  [!] 这个单元有问题: {why}")
+                ctx.say(f"      修: {CMD} timer on --interval 1h   (间隔按需改)")
         rc2, out2 = _systemctl("list-timers", TIMER_UNIT, "--no-pager")
         ctx.say(out2.rstrip() or "(无定时器记录)")
         ctx.say("\n命令: synapse timer on --interval 1h | off | run | log")

@@ -1,3 +1,18 @@
+synapse (1.27.0) unstable; urgency=medium
+
+  * 定时器单元路径不再烧死在旧位置
+    - _ensure_units 见到"单元已存在"就 continue, 永不刷新: 源码树里跑过
+      timer on 后再装 .deb, 用户目录那份遮蔽包里的, 定时器继续跑源码树
+    - 现在只在明确坏掉时重写(ExecStart 路径不存在 / 装了包还在跑 .py),
+      并说明原因; 能跑的不动
+  * timer status 打印"实际执行"并在有问题时给修法; doctor 新增
+    "定时器可执行文件" 一项
+  * 修测试隔离: USER_UNIT_DIR 未隔离, 测试会读真实用户的
+    ~/.config/systemd/user/
+  * 新测试 6 项; 测试 203 -> 209
+
+ -- ec <ec@localhost>  Thu, 22 Oct 2026 17:00:00 +0800
+
 synapse (1.26.0) unstable; urgency=medium
 
   * 自动结单必须是"连续"两轮: 用 recover_streak 计数, 不再数历史笔记
