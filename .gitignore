@@ -11,3 +11,4 @@ __pycache__/
 dist/
 # packaging/ 整棵树都是 build-deb.sh 的生成物; 源件全部在 packaging-src/
 packaging/
+LOOP.md

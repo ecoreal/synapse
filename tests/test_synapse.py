@@ -2271,7 +2271,7 @@ class TestTimerUnitStaleness(unittest.TestCase):
     "单元已存在" 就 continue —— 永不刷新。
 
     真实踩到: 在源码树里跑 timer on(单元里写 /usr/bin/python3
-    /home/ec/workspace/Synapse/synapse.py), 之后装上 .deb, 包里的单元被用户目录
+    源码树里的 synapse.py), 之后装上 .deb, 包里的单元被用户目录
     那份遮蔽, 定时器继续跑源码树。删掉/移走仓库 → 每小时失败一次, 只留在 journal
     里。工具自己说"已启用", 人不会去看 journal。
     """
