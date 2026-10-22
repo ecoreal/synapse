@@ -4,7 +4,7 @@ Section: utils
 Priority: optional
 Architecture: all
 Depends: python3 (>= 3.9)
-Maintainer: ec <ec@localhost>
+Maintainer: ec <ec@users.noreply.github.com>
 Description: pi 模型中转站连通性监控/诊断/配置修复工具
  Synapse 监控 pi 的模型中转站(API relay): 连通性检查、流式/工具调用/
  thinking/图像/前缀缓存五维诊断、长跑失败统计、问题台账,

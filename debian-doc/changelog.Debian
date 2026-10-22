@@ -12,7 +12,7 @@ synapse (1.30.0) unstable; urgency=medium
   * 启动器主入口改为打开控制台, 另留 synapse-status.desktop 终端入口
   * 新测试 20 项; 测试 223 -> 243
 
- -- ec <ec@localhost>  Thu, 22 Oct 2026 19:20:00 +0800
+ -- ec <ec@users.noreply.github.com>  Thu, 22 Oct 2026 19:20:00 +0800
 
 synapse (1.29.0) unstable; urgency=medium
 
@@ -23,7 +23,7 @@ synapse (1.29.0) unstable; urgency=medium
     - hicolor 图标; postinst 刷新 update-desktop-database 与图标缓存
   * 新测试 6 项(含 desktop-file-validate); 测试 217 -> 223
 
- -- ec <ec@localhost>  Thu, 22 Oct 2026 18:10:00 +0800
+ -- ec <ec@users.noreply.github.com>  Thu, 22 Oct 2026 18:10:00 +0800
 
 synapse (1.28.0) unstable; urgency=medium
 
@@ -35,7 +35,7 @@ synapse (1.28.0) unstable; urgency=medium
     - --dry-run 预览 / --json 机器可读
   * 新测试 8 项; 测试 209 -> 217
 
- -- ec <ec@localhost>  Thu, 22 Oct 2026 17:20:00 +0800
+ -- ec <ec@users.noreply.github.com>  Thu, 22 Oct 2026 17:20:00 +0800
 
 synapse (1.27.0) unstable; urgency=medium
 
@@ -50,7 +50,7 @@ synapse (1.27.0) unstable; urgency=medium
     ~/.config/systemd/user/
   * 新测试 6 项; 测试 203 -> 209
 
- -- ec <ec@localhost>  Thu, 22 Oct 2026 17:00:00 +0800
+ -- ec <ec@users.noreply.github.com>  Thu, 22 Oct 2026 17:00:00 +0800
 
 synapse (1.26.0) unstable; urgency=medium
 
@@ -61,7 +61,7 @@ synapse (1.26.0) unstable; urgency=medium
     - 老台账首次处理时从末尾恢复笔记推算, 平滑迁移
   * 新测试 3 项; 测试 200 -> 203
 
- -- ec <ec@localhost>  Thu, 22 Oct 2026 14:20:00 +0800
+ -- ec <ec@users.noreply.github.com>  Thu, 22 Oct 2026 14:20:00 +0800
 
 synapse (1.25.0) unstable; urgency=medium
 
@@ -74,7 +74,7 @@ synapse (1.25.0) unstable; urgency=medium
     测试实际读的是真实用户的 ~/.config/synapse/STATIONS.md
   * 新测试 3 项(拒绝空清单/不打印 0→0/读取当前配置的文件); 测试 197 -> 200
 
- -- ec <ec@localhost>  Thu, 22 Oct 2026 13:40:00 +0800
+ -- ec <ec@users.noreply.github.com>  Thu, 22 Oct 2026 13:40:00 +0800
 
 synapse (1.24.0) unstable; urgency=medium
 
@@ -86,7 +86,7 @@ synapse (1.24.0) unstable; urgency=medium
   * default 不继承: 默认站只由 --default 决定, 避免出现两个默认站
   * 新测试 4 项; 测试 193 -> 197
 
- -- ec <ec@localhost>  Thu, 22 Oct 2026 13:05:00 +0800
+ -- ec <ec@users.noreply.github.com>  Thu, 22 Oct 2026 13:05:00 +0800
 
 synapse (1.23.0) unstable; urgency=medium
 
@@ -98,7 +98,7 @@ synapse (1.23.0) unstable; urgency=medium
   * sync-stations --dry-run: 只打印会怎么改, 不写盘
   * 新测试 3 项(备份/移除警告/dry-run); 测试 190 -> 193
 
- -- ec <ec@localhost>  Thu, 22 Oct 2026 12:40:00 +0800
+ -- ec <ec@users.noreply.github.com>  Thu, 22 Oct 2026 12:40:00 +0800
 
 synapse (1.22.0) unstable; urgency=medium
 
@@ -113,7 +113,7 @@ synapse (1.22.0) unstable; urgency=medium
   * 真实数据上修复 2 项, doctor 警告 3 -> 2
   * 测试 186 -> 190 项
 
- -- ec <ec@localhost>  Thu, 22 Oct 2026 00:05:00 +0800
+ -- ec <ec@users.noreply.github.com>  Thu, 22 Oct 2026 00:05:00 +0800
 
 synapse (1.21.0) unstable; urgency=medium
 
@@ -124,7 +124,7 @@ synapse (1.21.0) unstable; urgency=medium
   * 数字一致时不输出解释行(不制造噪音)
   * 测试 184 -> 186 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 23:40:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 23:40:00 +0800
 
 synapse (1.20.0) unstable; urgency=medium
 
@@ -137,7 +137,7 @@ synapse (1.20.0) unstable; urgency=medium
   * 真实数据上 38 项 → 0 项
   * 测试 179 -> 184 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 23:20:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 23:20:00 +0800
 
 synapse (1.19.0) unstable; urgency=medium
 
@@ -150,7 +150,7 @@ synapse (1.19.0) unstable; urgency=medium
   * 抽 _since_hours(): timeline 与 status 共用同一份时长计算
   * 测试 175 -> 179 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 23:00:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 23:00:00 +0800
 
 synapse (1.18.0) unstable; urgency=medium
 
@@ -163,7 +163,7 @@ synapse (1.18.0) unstable; urgency=medium
   * _uptime_stats 增加 since/last_ok/streak 字段(供 timeline 与 --json 使用)
   * 测试 170 -> 175 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 22:45:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 22:45:00 +0800
 
 synapse (1.17.0) unstable; urgency=medium
 
@@ -176,7 +176,7 @@ synapse (1.17.0) unstable; urgency=medium
     - 真实数据: 默认站 hyb 45.1% / 51 次 / 连败 17, 推荐 tierflow
   * 测试 167 -> 170 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 22:30:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 22:30:00 +0800
 
 synapse (1.16.0) unstable; urgency=medium
 
@@ -190,7 +190,7 @@ synapse (1.16.0) unstable; urgency=medium
     - --json 给出 pick/ranked/excluded/insufficient_samples, 不是只有一个赢家
   * 测试 161 -> 167 项(含补全漂移双向比对)
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 22:15:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 22:15:00 +0800
 
 synapse (1.15.0) unstable; urgency=medium
 
@@ -203,7 +203,7 @@ synapse (1.15.0) unstable; urgency=medium
     —— 修好写入只能保护以后, 已经落盘的历史文件必须被人看见
   * 测试 155 -> 161 项(含一个会用本地 HTTP 服务回显 Authorization 的端到端用例)
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 22:00:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 22:00:00 +0800
 
 synapse (1.14.0) unstable; urgency=medium
 
@@ -216,7 +216,7 @@ synapse (1.14.0) unstable; urgency=medium
     - --json 增加 counter_evidence: [{target, ok}]
   * 测试 152 -> 155 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 21:45:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 21:45:00 +0800
 
 synapse (1.13.0) unstable; urgency=medium
 
@@ -231,7 +231,7 @@ synapse (1.13.0) unstable; urgency=medium
   * report 仪表盘顶部新增"该做什么"一栏, 与 explain 共用同一份聚合
   * 测试 145 -> 152 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 21:30:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 21:30:00 +0800
 
 synapse (1.12.0) unstable; urgency=medium
 
@@ -246,7 +246,7 @@ synapse (1.12.0) unstable; urgency=medium
   * 新增渲染层 synapse_dashboard.py(纯函数, 数据 → HTML, 不读盘不联网)
   * 测试 138 -> 145 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 21:10:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 21:10:00 +0800
 
 synapse (1.11.0) unstable; urgency=medium
 
@@ -260,7 +260,7 @@ synapse (1.11.0) unstable; urgency=medium
   * 修正测试自身的三处未闭合文件(ResourceWarning 严格模式下的噪音)
   * 测试 123 -> 138 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 19:30:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 19:30:00 +0800
 
 synapse (1.10.0) unstable; urgency=medium
 
@@ -270,7 +270,7 @@ synapse (1.10.0) unstable; urgency=medium
     延迟刻意不聚合 —— 各模型的 p50 混在一起没有意义
   * 测试 116 -> 123 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 18:55:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 18:55:00 +0800
 
 synapse (1.9.0) unstable; urgency=medium
 
@@ -281,7 +281,7 @@ synapse (1.9.0) unstable; urgency=medium
   * "哪些判定算成功"的名单从三处重复定义收敛为单一 _OK_KINDS
   * 测试 104 -> 116 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 18:40:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 18:40:00 +0800
 
 synapse (1.8.0) unstable; urgency=medium
 
@@ -292,7 +292,7 @@ synapse (1.8.0) unstable; urgency=medium
     + synapse_probe.py(探测); 判定层为纯函数, 可穷举测试
   * 测试 84 -> 103 项; 打包脚本增加"解包能否运行"自检
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 18:10:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 18:10:00 +0800
 
 synapse (1.7.0) unstable; urgency=medium
 
@@ -310,7 +310,7 @@ synapse (1.7.0) unstable; urgency=medium
     常量都在隔离目录内、HOME 不指向真实目录
   * 测试 72 -> 84 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 17:40:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 17:40:00 +0800
 
 synapse (1.6.0) unstable; urgency=medium
 
@@ -322,7 +322,7 @@ synapse (1.6.0) unstable; urgency=medium
   * 新增 --stale-hours 覆盖阈值
   * 测试 67 -> 72 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 17:05:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 17:05:00 +0800
 
 synapse (1.5.0) unstable; urgency=medium
 
@@ -341,7 +341,7 @@ synapse (1.5.0) unstable; urgency=medium
     (man page 之前一直写着 1.0.0, 发到 1.4.0 都没人发现)
   * 测试 48 -> 67 项
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 16:45:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 16:45:00 +0800
 
 synapse (1.4.0) unstable; urgency=medium
 
@@ -356,7 +356,7 @@ synapse (1.4.0) unstable; urgency=medium
   * 测试 39 -> 48 项: 新增 CLI 端到端用例(--json 的 stdout 是否纯 JSON、
     fix 不加 --apply 是否真的没写盘、缺配置的报错路径等)
 
- -- ec <ec@localhost>  Wed, 21 Oct 2026 16:25:00 +0800
+ -- ec <ec@users.noreply.github.com>  Wed, 21 Oct 2026 16:25:00 +0800
 
 synapse (1.3.0) unstable; urgency=medium
 
@@ -378,7 +378,7 @@ synapse (1.3.0) unstable; urgency=medium
   * 测试从 24 项增至 39 项: 工具判定(正/反例)、原子写、targets_of 过滤与快照、
     配置错误行
 
- -- ec <ec@localhost>  Tue, 20 Oct 2026 23:05:00 +0800
+ -- ec <ec@users.noreply.github.com>  Tue, 20 Oct 2026 23:05:00 +0800
 
 synapse (1.2.0) unstable; urgency=medium
 
@@ -396,7 +396,7 @@ synapse (1.2.0) unstable; urgency=medium
   * 修 check --json 输出被人类可读表格污染(README 一直写着的 | jq 用法其实是坏的):
     --json 时人类可读输出全部改道 stderr, stdout 只剩 JSON
 
- -- ec <ec@localhost>  Tue, 20 Oct 2026 22:10:00 +0800
+ -- ec <ec@users.noreply.github.com>  Tue, 20 Oct 2026 22:10:00 +0800
 
 synapse (1.1.0) unstable; urgency=medium
 
@@ -406,7 +406,7 @@ synapse (1.1.0) unstable; urgency=medium
   * 新增 Debian changelog / copyright, 补齐 lintian 要求
   * 体检服务 SuccessExitStatus=0 1: "发现异常"不算服务失败
 
- -- ec <ec@localhost>  Tue, 20 Oct 2026 18:00:00 +0800
+ -- ec <ec@users.noreply.github.com>  Tue, 20 Oct 2026 18:00:00 +0800
 
 synapse (1.0.0) unstable; urgency=medium
 
@@ -417,4 +417,4 @@ synapse (1.0.0) unstable; urgency=medium
     man 手册, bash 补全
   * 构建脚本带密钥清点: 数据/密钥文件混入包即中止
 
- -- ec <ec@localhost>  Tue, 20 Oct 2026 17:44:00 +0800
+ -- ec <ec@users.noreply.github.com>  Tue, 20 Oct 2026 17:44:00 +0800
